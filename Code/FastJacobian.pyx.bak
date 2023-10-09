@@ -1,0 +1,3627 @@
+import numpy as np
+from scipy.sparse import csc_matrix
+import time 
+
+class fastJacobian:
+    def __init__(self, r, L, nu, dgen, w0_derivs, t_derivs):
+        self.r, self.L, self.nu, = r, L, nu
+        self.dgen = dgen
+        self.w0_derivs = w0_derivs
+        self.t_derivs = t_derivs
+        
+    def calcJacob(self, double[:,:] w, double[:,:] u, double[:,:] v, bc_type = 'disp', theory = 'Shiftable'):
+        
+        t0 = time.time()
+        
+        #If I really want to make this faster, then could parallel process it easily, since each i/j coordinate is independent
+        cdef double r = self.r
+        cdef double L = self.L
+        cdef double nu = self.nu
+        
+        cdef double D = np.mean(self.t_derivs[0])**2/(12-12*nu**2)
+        
+        cdef double[:] consts = np.array([D, nu, r, L])
+        
+        cdef int Lpnts = w.shape[0]
+        cdef int rpnts = w.shape[1]
+        
+        dgen = self.dgen
+        
+        cdef int order_x = dgen.order_x
+        cdef int order_y = dgen.order_y
+        
+        #Initialize deriv arrays
+        cdef double[:,:] wx = dgen.deriv(np.array(w), 1, 0)
+        cdef double[:,:] wy = dgen.deriv(np.array(w), 0, 1)
+        cdef double[:,:] wxx = dgen.deriv(np.array(w), 2, 0)
+        cdef double[:,:] wxy = dgen.deriv(np.array(w), 1, 1)
+        cdef double[:,:] wyy = dgen.deriv(np.array(w), 0, 2)
+        
+        cdef double[:,:] ux = dgen.deriv(np.array(u), 1, 0)
+        cdef double[:,:] uy = dgen.deriv(np.array(u), 0, 1)
+        cdef double[:,:] uxx = dgen.deriv(np.array(u), 2, 0)
+        cdef double[:,:] uxy = dgen.deriv(np.array(u), 1, 1)
+        cdef double[:,:] uyy = dgen.deriv(np.array(u), 0, 2)
+        
+        cdef double[:,:] vx = dgen.deriv(np.array(v), 1, 0)
+        cdef double[:,:] vy = dgen.deriv(np.array(v), 0, 1)
+        cdef double[:,:] vxx = dgen.deriv(np.array(v), 2, 0)
+        cdef double[:,:] vxy = dgen.deriv(np.array(v), 1, 1)
+        cdef double[:,:] vyy = dgen.deriv(np.array(v), 0, 2)
+        
+        cdef double[:,:] w0 = self.w0_derivs[0]
+        cdef double[:,:] w0x = self.w0_derivs[1]
+        cdef double[:,:] w0y = self.w0_derivs[2]
+        cdef double[:,:] w0xx = self.w0_derivs[3]
+        cdef double[:,:] w0xy = self.w0_derivs[4]
+        cdef double[:,:] w0yy = self.w0_derivs[5]
+        
+        #Get the w, w0, u, v deriv arrays
+        cdef double[:,:,:] w_derivs = np.zeros((6, Lpnts, rpnts))
+        w_derivs[0,:,:] = w
+        w_derivs[1,:,:] = wx
+        w_derivs[2,:,:] = wy
+        w_derivs[3,:,:] = wxx
+        w_derivs[4,:,:] = wxy
+        w_derivs[5,:,:] = wyy
+        
+        cdef double[:,:,:] u_derivs = np.zeros((5, Lpnts, rpnts))
+        u_derivs[0,:,:] = ux
+        u_derivs[1,:,:] = uy
+        u_derivs[2,:,:] = uxx
+        u_derivs[3,:,:] = uxy
+        u_derivs[4,:,:] = uyy
+        
+        cdef double[:,:,:] v_derivs = np.zeros((5, Lpnts, rpnts))
+        v_derivs[0,:,:] = vx
+        v_derivs[1,:,:] = vy
+        v_derivs[2,:,:] = vxx
+        v_derivs[3,:,:] = vxy
+        v_derivs[4,:,:] = vyy
+        
+        cdef double[:,:,:] w0_derivs = self.w0_derivs
+        
+        #Initialize stencils
+        
+        cdef double[:,:] s_0
+        cdef double[:,:] s_dx
+        cdef double[:,:] s_dy
+        cdef double[:,:] s_dxx
+        cdef double[:,:] s_dxy
+        cdef double[:,:] s_dyy
+        cdef double[:,:] s_dxxxx
+        cdef double[:,:] s_dxxyy
+        cdef double[:,:] s_dyyyy
+        
+        cdef double[:,:,:] stencils
+        
+        #Calculate the stencils for all the required derivatives in the bulk 
+        #Edge cases are calculated in the loop
+        
+        cdef double[:,:] sb_0 = dgen.gen_stencil(0,0)
+        
+        cdef double[:,:] sb_dx = dgen.gen_stencil(1,0)
+        cdef double[:,:] sb_dy = dgen.gen_stencil(0,1)
+        
+        cdef double[:,:] sb_dxx = dgen.gen_stencil(2,0)
+        cdef double[:,:] sb_dxy = dgen.gen_stencil(1,1)
+        cdef double[:,:] sb_dyy = dgen.gen_stencil(0,2)
+        
+        cdef double[:,:] sb_dxxxx = dgen.gen_stencil(4,0)
+        cdef double[:,:] sb_dxxyy = dgen.gen_stencil(2,2)
+        cdef double[:,:] sb_dyyyy = dgen.gen_stencil(0,4)
+        
+        cdef double[:,:,:] bulk_stencils = np.zeros((9, 3+2*order_x, 3+2*order_y))
+        bulk_stencils[0,:,:] = sb_0
+        
+        bulk_stencils[1,:,:] = sb_dx
+        bulk_stencils[2,:,:] = sb_dy
+        
+        bulk_stencils[3,:,:] = sb_dxx
+        bulk_stencils[4,:,:] = sb_dxy
+        bulk_stencils[5,:,:] = sb_dyy
+        
+        bulk_stencils[6,:,:] = sb_dxxxx
+        bulk_stencils[7,:,:] = sb_dxxyy
+        bulk_stencils[8,:,:] = sb_dyyyy
+        
+        cdef double[:,:,:] edge_stencils = np.zeros((9, 4+2*order_x, 3+2*order_y))
+        
+        cdef int[:] si
+        cdef int[:] sbi = np.arange(3+2*order_x) - order_x - 1
+        
+        cdef int[:] sj = np.arange(3+2*order_y) - order_y - 1
+        
+        cdef int max_points = (4+2*order_x)*(4+2*order_y)*w.size*3*3
+        
+        cdef double[:] matrixData = np.zeros(max_points, dtype = 'float')
+        cdef int[:] matrixRow = np.arange(max_points, dtype = 'int')
+        cdef int[:] matrixCol = np.zeros(max_points, dtype = 'int')
+        
+        cdef int i_bc0 = 1
+        cdef int i_bcL = Lpnts - 2
+        
+        cdef int data_ind = 0
+        cdef int ind_1D_w
+        cdef int ind_1D_u
+        cdef int ind_1D_v
+        
+        cdef int i, j, m, n
+        
+        #Stresses are inputs to the formulas at places, so calculate those first
+        cdef double[:,:] sigx = np.zeros_like(np.array(w))
+        cdef double[:,:] sigy = np.zeros_like(np.array(w))
+        cdef double[:,:] sigy_y = np.zeros_like(np.array(w))
+        cdef double[:,:] tau = np.zeros_like(np.array(w))
+        cdef double ep1, ep1_y, ep2, ep2_y, gamma
+        
+        cdef double[:] partials = np.zeros(9)
+        
+        for i in range(Lpnts):
+            for j in range(rpnts):
+                if theory == 'Shiftable':
+                    ep1 = ux[i,j] + wx[i,j]**2/2 + wx[i,j]*w0x[i,j]
+                    ep2 = (1-w[i,j]/r-w0[i,j]/r)*vy[i,j] - w[i,j]/r + wy[i,j]**2/2 + wy[i,j]*w0y[i,j]
+                    gamma = vx[i,j] + uy[i,j] + wx[i,j]*wy[i,j] + w0x[i,j]*wy[i,j] + wx[i,j]*w0y[i,j]
+                    
+                    ep1_y = uxy[i,j] + wxy[i,j]*(wx[i,j] + w0x[i,j]) + wx[i,j]*w0xy[i,j]
+                    ep2_y = (1-w[i,j]/r-w0[i,j]/r)*vyy[i,j] - w0y[i,j]*vy[i,j]/r - (wy[i,j])*(vy[i,j]/r + 1/r - wyy[i,j] - w0yy[i,j]) + wyy[i,j]*w0y[i,j] 
+                elif theory == 'Donnell':
+                    ep1 = ux[i,j] + wx[i,j]**2/2 + wx[i,j]*w0x[i,j]
+                    ep2 = vy[i,j] - w[i,j]/r + wy[i,j]**2/2 + wy[i,j]*w0y[i,j]
+                    gamma = vx[i,j] + uy[i,j] + wx[i,j]*wy[i,j] + w0x[i,j]*wy[i,j] + wx[i,j]*w0y[i,j]
+                    
+                    ep1_y = uxy[i,j] + wxy[i,j]*(wx[i,j] + w0x[i,j]) + wx[i,j]*w0xy[i,j]
+                    ep2_y = vyy[i,j] - (wy[i,j])*(1/r - wyy[i,j] - w0yy[i,j]) + wyy[i,j]*w0y[i,j] 
+                elif theory == 'Total':
+                    #placeholder
+                    pass
+                    
+                sigx[i,j] = (ep1 + nu*ep2)/(1-nu**2)
+                sigy[i,j] = (nu*ep1 + ep2)/(1-nu**2)
+                tau[i,j] = gamma/(2*(1+nu))
+                
+                sigy_y[i,j] = (nu*ep1_y + ep2_y)/(1-nu**2)
+                
+        cdef double[:,:,:] sigx_derivs = np.zeros((1, Lpnts, rpnts))
+        sigx_derivs[0,:,:] = sigx
+        
+        cdef double[:,:,:] sigy_derivs = np.zeros((2, Lpnts, rpnts))
+        sigy_derivs[0,:,:] = sigy
+        sigy_derivs[1,:,:] = sigy_y
+        
+        cdef double[:,:,:] tau_derivs = np.zeros((1, Lpnts, rpnts))
+        tau_derivs[0,:,:] = tau
+        
+        for i in range(Lpnts):
+            #First get stencils for the current axial position (it varies when close to the edge)
+            #If in bulk use bulk stencils
+            if i > order_x and i < Lpnts - 1 - order_x:
+                si = sbi
+                stencils = bulk_stencils
+                #s_0, s_dx, s_dy, s_dxx, s_dxy, s_dyy, s_dxxxx, s_dxxyy, s_dyyyy = sb_0, sb_dx, sb_dy, sb_dxx, sb_dxy, sb_dyy, sb_dxxxx, sb_dxxyy, sb_dyyyy
+            #Otherwise generate edge stencils 
+            else:
+                #Boundary conditions for i = 0 and i = Lpnts-1 are calculated for the second point from the end
+                if i == 0:
+                    i_calc = i_bc0
+                elif i == Lpnts-1:
+                    i_calc = i_bcL
+                else:
+                    i_calc = i
+                
+                #Calculate the stencils for all the required derivatives
+                
+                s_0 = dgen.gen_stencil(0,0,i_calc)
+                
+                s_dx = dgen.gen_stencil(1,0,i_calc)
+                s_dy = dgen.gen_stencil(0,1,i_calc)
+                
+                s_dxx = dgen.gen_stencil(2,0,i_calc)
+                s_dxy = dgen.gen_stencil(1,1,i_calc)
+                s_dyy = dgen.gen_stencil(0,2,i_calc)
+                
+                s_dxxxx = dgen.gen_stencil(4,0,i_calc)
+                s_dxxyy = dgen.gen_stencil(2,2,i_calc)
+                s_dyyyy = dgen.gen_stencil(0,4,i_calc)
+                
+                edge_stencils[0,:,:] = s_0
+                
+                edge_stencils[1,:,:] = s_dx
+                edge_stencils[2,:,:] = s_dy
+                
+                edge_stencils[3,:,:] = s_dxx
+                edge_stencils[4,:,:] = s_dxy
+                edge_stencils[5,:,:] = s_dyy
+                
+                edge_stencils[6,:,:] = s_dxxxx
+                edge_stencils[7,:,:] = s_dxxyy
+                edge_stencils[8,:,:] = s_dyyyy
+                
+                stencils = edge_stencils
+                if i_calc <= order_x:
+                    si = np.arange(4+2*order_x) - i_calc
+                else:
+                    si = -np.arange(4+2*order_x)[::-1] + (Lpnts - 1 - i_calc)
+            
+            for j in range(rpnts):
+                #i corresponds to x, where x(i = 0) = -order_x * hx, x(i = order_x) = 0, x(i = Lpnts -1 + order_x) = L, x(i = Lpnts -1 + 2*order_x) = L + order_x*hx
+                #j corresponds to y, where y(j = 0) = 0 and y(j = rpnts - 1) = 2pi r - hy. 
+                
+                ind_1D_w = calc1DIndex(i,j, 0, Lpnts, rpnts)
+                ind_1D_u = calc1DIndex(i,j, 1, Lpnts, rpnts)
+                ind_1D_v = calc1DIndex(i,j, 2, Lpnts, rpnts)
+                
+                #first take care of boundary conditions
+                if i == 0:
+                    #w(x=0) = 0 or nu*r*load
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, calc1DIndex(i_bc0, j, 0, Lpnts, rpnts))
+                    
+                    #v(x=0) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_v, calc1DIndex(i_bc0, j, 2, Lpnts, rpnts))
+                    
+                    #u(x=0) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_u, calc1DIndex(i_bc0, j, 1, Lpnts, rpnts))
+                    
+                elif i == 1:
+                    #wx(x=L) = 0
+                    for m in range(si.size):
+                        i_ind = i_bc0 + si[m]
+                        for n in range(sj.size):
+                            j_ind = j+sj[n]
+                            if stencils[1][m,n] != 0:
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, stencils[1][m,n], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                
+                            #add the regular u and v stability equations
+                            
+                            #Calculate the partials for the current values of i,j,m,n 
+                            partials = calcPartials(partials, w_derivs[:,i,j], u_derivs[:,i,j], v_derivs[:,i,j], w0_derivs[:,i,j], sigx_derivs[:,i,j], sigy_derivs[:,i,j], tau_derivs[:,i,j], stencils[:,m,n], consts, theory)
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[3], ind_1D_u, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[4], ind_1D_u, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[5], ind_1D_u, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[6], ind_1D_v, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[7], ind_1D_v, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[8], ind_1D_v, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                
+                elif i == Lpnts - 2:
+                    #wx(x=L) = 0
+                    for m in range(si.size):
+                        i_ind = i_bcL + si[m]
+                        for n in range(sj.size):
+                            j_ind = j+sj[n]
+                            if stencils[1][m,n] != 0:
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, stencils[1][m,n], ind_1D_w, calc1DIndex(i_ind,j_ind, 0, Lpnts, rpnts))
+                                
+                            #add the regular u and v stability equations
+                            
+                            #Calculate the partials for the current values of i,j,m,n 
+                            partials = calcPartials(partials, w_derivs[:,i,j], u_derivs[:,i,j], v_derivs[:,i,j], w0_derivs[:,i,j], sigx_derivs[:,i,j], sigy_derivs[:,i,j], tau_derivs[:,i,j], stencils[:,m,n], consts, theory)
+                            
+                            #Add the partials to the Jacobian
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[3], ind_1D_u, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[4], ind_1D_u, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[5], ind_1D_u, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[6], ind_1D_v, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[7], ind_1D_v, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[8], ind_1D_v, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                
+                elif i == Lpnts - 1:
+                    #w(x=L) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, calc1DIndex(i_bcL, j, 0, Lpnts, rpnts))
+                    
+                    #v(x = L) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_v, calc1DIndex(i_bcL, j, 2, Lpnts, rpnts))
+                    
+                    if bc_type == 'disp':
+                        #u(x = L) = whatever it needs to be
+                        data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_u, calc1DIndex(i_bcL, j, 1, Lpnts, rpnts))
+                    elif bc_type == 'load':
+                        if j == 0:
+                            #Average applied load
+                            #sigx = (ep1 + nu ep2)/(1-nu**2)
+                            #For now only do Donnell and only specify the average load on the rim. 
+                            #Could equivalently (but more mathematically robustly) specify the average axial load in the entire system
+                            #ep1 = ux + wx^2/2 + wx w0x
+                            #ep2 = vy - w/r + wy^2/2 + wy w0y
+                            #vy, wy, wx are zero. So, simplifies to
+                            #sigx = (ux - nu w / r)/(1-nu^2)
+                            
+                            for m in range(si.size):
+                                i_ind = i_bcL + si[m]
+                                for n in range(sj.size):
+                                    j_ind = sj[n]
+                                    
+                                    sigx_w = (nu*s_0[m,n])/(1-nu**2)/rpnts
+                                    sigx_u = (s_dx[m,n])/(1-nu**2)/rpnts
+                                    
+                                    if sigx_u != 0:
+                                        for k in range(rpnts):
+                                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, sigx_u, ind_1D_u, calc1DIndex(i_ind, k+j_ind, 1, Lpnts, rpnts))
+                                    
+                                    if sigx_w != 0:
+                                        for k in range(rpnts):
+                                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, sigx_w, ind_1D_u, calc1DIndex(i_ind, k+j_ind, 0, Lpnts, rpnts))
+                        else:
+                            #u(x=L, y) - u(x=L, y+dy) = 0
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_u, calc1DIndex(i_bcL, j-1, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, -1, ind_1D_u, calc1DIndex(i_bcL, j, 1, Lpnts, rpnts))
+                    
+                else:
+                    
+                    for m in range(si.size):
+                        i_ind = i+si[m]
+                        for n in range(sj.size):
+                            j_ind = j+sj[n]
+                            
+                            #Calculate the partials for the current values of i,j,m,n 
+                            partials = calcPartials(partials, w_derivs[:,i,j], u_derivs[:,i,j], v_derivs[:,i,j], w0_derivs[:,i,j], sigx_derivs[:,i,j], sigy_derivs[:,i,j], tau_derivs[:,i,j], stencils[:,m,n], consts, theory)
+                            
+                            #Add the partials to the Jacobian
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[0], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[1], ind_1D_w, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[2], ind_1D_w, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[3], ind_1D_u, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[4], ind_1D_u, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[5], ind_1D_u, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[6], ind_1D_v, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[7], ind_1D_v, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[8], ind_1D_v, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+        
+        #t1 = time.time()
+        #print("Took " + str(t1-t0) + " seconds to get the sparse jacobian matrix rows and cols.")
+        
+        #zero_inds = np.where(np.array(matrixData) == 0)
+        
+        #print(zero_inds[0])
+        #print(data_ind)
+        
+        #matrixData = np.delete(matrixData, zero_inds)
+        #matrixRow = np.delete(matrixRow, zero_inds)
+        #matrixCol = np.delete(matrixCol, zero_inds)
+        
+        matrixData = matrixData[0:data_ind]
+        matrixRow = matrixRow[0:data_ind]
+        matrixCol = matrixCol[0:data_ind]
+        
+        matrix = (matrixData, (matrixRow, matrixCol))
+        #print(3*Lpnts*rpnts)
+        #print(max(matrixCol))
+        #print(max(matrixRow))
+        #print(min(matrixCol))
+        #print(min(matrixRow))
+        
+        #t2 = time.time()
+        #print("Took " + str(t2-t1) + " seconds to delete shit.")
+        
+        jacobian = csc_matrix(matrix, shape = (3*Lpnts*rpnts, 3*Lpnts*rpnts))
+        jacobian.sort_indices() #Sort indices for pypardiso compatibility
+        
+        #t3 = time.time()
+        #print("Took " + str(t3-t1) + " seconds to create the sparse jacobian matrix.")
+        
+        return jacobian
+    
+    def calcJacobTVar2(self, double[:,:] w, double[:,:] u, double[:,:] v, bc_type = 'disp', theory = 'Shiftable'):
+        
+        t0 = time.time()
+        
+        #If I really want to make this faster, then could parallel process it easily, since each i/j coordinate is independent
+        cdef double r = self.r
+        cdef double L = self.L
+        cdef double nu = self.nu
+        
+        cdef double[:,:] D = self.t_derivs[0]**2/(12-12*nu**2)
+        
+        cdef double[:] consts = np.array([D[0,0], nu, r, L])
+        
+        cdef int Lpnts = w.shape[0]
+        cdef int rpnts = w.shape[1]
+        
+        dgen = self.dgen
+        
+        cdef int order_x = dgen.order_x
+        cdef int order_y = dgen.order_y
+        
+        #Initialize deriv arrays
+        cdef double[:,:] wx = dgen.deriv(np.array(w), 1, 0)
+        cdef double[:,:] wy = dgen.deriv(np.array(w), 0, 1)
+        cdef double[:,:] wxx = dgen.deriv(np.array(w), 2, 0)
+        cdef double[:,:] wxy = dgen.deriv(np.array(w), 1, 1)
+        cdef double[:,:] wyy = dgen.deriv(np.array(w), 0, 2)
+        
+        cdef double[:,:] ux = dgen.deriv(np.array(u), 1, 0)
+        cdef double[:,:] uy = dgen.deriv(np.array(u), 0, 1)
+        cdef double[:,:] uxx = dgen.deriv(np.array(u), 2, 0)
+        cdef double[:,:] uxy = dgen.deriv(np.array(u), 1, 1)
+        cdef double[:,:] uyy = dgen.deriv(np.array(u), 0, 2)
+        
+        cdef double[:,:] vx = dgen.deriv(np.array(v), 1, 0)
+        cdef double[:,:] vy = dgen.deriv(np.array(v), 0, 1)
+        cdef double[:,:] vxx = dgen.deriv(np.array(v), 2, 0)
+        cdef double[:,:] vxy = dgen.deriv(np.array(v), 1, 1)
+        cdef double[:,:] vyy = dgen.deriv(np.array(v), 0, 2)
+        
+        cdef double[:,:] w0 = self.w0_derivs[0]
+        cdef double[:,:] w0x = self.w0_derivs[1]
+        cdef double[:,:] w0y = self.w0_derivs[2]
+        cdef double[:,:] w0xx = self.w0_derivs[3]
+        cdef double[:,:] w0xy = self.w0_derivs[4]
+        cdef double[:,:] w0yy = self.w0_derivs[5]
+        
+        #Get the w, w0, u, v deriv arrays
+        cdef double[:,:,:] w_derivs = np.zeros((6, Lpnts, rpnts))
+        w_derivs[0,:,:] = w
+        w_derivs[1,:,:] = wx
+        w_derivs[2,:,:] = wy
+        w_derivs[3,:,:] = wxx
+        w_derivs[4,:,:] = wxy
+        w_derivs[5,:,:] = wyy
+        
+        cdef double[:,:,:] u_derivs = np.zeros((5, Lpnts, rpnts))
+        u_derivs[0,:,:] = ux
+        u_derivs[1,:,:] = uy
+        u_derivs[2,:,:] = uxx
+        u_derivs[3,:,:] = uxy
+        u_derivs[4,:,:] = uyy
+        
+        cdef double[:,:,:] v_derivs = np.zeros((5, Lpnts, rpnts))
+        v_derivs[0,:,:] = vx
+        v_derivs[1,:,:] = vy
+        v_derivs[2,:,:] = vxx
+        v_derivs[3,:,:] = vxy
+        v_derivs[4,:,:] = vyy
+        
+        cdef double[:,:,:] w0_derivs = self.w0_derivs
+        
+        #Initialize stencils
+        
+        cdef double[:,:] s_0
+        cdef double[:,:] s_dx
+        cdef double[:,:] s_dy
+        cdef double[:,:] s_dxx
+        cdef double[:,:] s_dxy
+        cdef double[:,:] s_dyy
+        cdef double[:,:] s_dxxxx
+        cdef double[:,:] s_dxxyy
+        cdef double[:,:] s_dyyyy
+        
+        cdef double[:,:,:] stencils
+        
+        #Calculate the stencils for all the required derivatives in the bulk 
+        #Edge cases are calculated in the loop
+        
+        cdef double[:,:] sb_0 = dgen.gen_stencil(0,0)
+        
+        cdef double[:,:] sb_dx = dgen.gen_stencil(1,0)
+        cdef double[:,:] sb_dy = dgen.gen_stencil(0,1)
+        
+        cdef double[:,:] sb_dxx = dgen.gen_stencil(2,0)
+        cdef double[:,:] sb_dxy = dgen.gen_stencil(1,1)
+        cdef double[:,:] sb_dyy = dgen.gen_stencil(0,2)
+        
+        cdef double[:,:] sb_dxxxx = dgen.gen_stencil(4,0)
+        cdef double[:,:] sb_dxxyy = dgen.gen_stencil(2,2)
+        cdef double[:,:] sb_dyyyy = dgen.gen_stencil(0,4)
+        
+        cdef double[:,:,:] bulk_stencils = np.zeros((9, 3+2*order_x, 3+2*order_y))
+        bulk_stencils[0,:,:] = sb_0
+        
+        bulk_stencils[1,:,:] = sb_dx
+        bulk_stencils[2,:,:] = sb_dy
+        
+        bulk_stencils[3,:,:] = sb_dxx
+        bulk_stencils[4,:,:] = sb_dxy
+        bulk_stencils[5,:,:] = sb_dyy
+        
+        bulk_stencils[6,:,:] = sb_dxxxx
+        bulk_stencils[7,:,:] = sb_dxxyy
+        bulk_stencils[8,:,:] = sb_dyyyy
+        
+        cdef double[:,:,:] edge_stencils = np.zeros((9, 4+2*order_x, 3+2*order_y))
+        
+        cdef int[:] si
+        cdef int[:] sbi = np.arange(3+2*order_x) - order_x - 1
+        
+        cdef int[:] sj = np.arange(3+2*order_y) - order_y - 1
+        
+        cdef int max_points = (4+2*order_x)*(4+2*order_y)*w.size*3*3
+        
+        cdef double[:] matrixData = np.zeros(max_points, dtype = 'float')
+        cdef int[:] matrixRow = np.arange(max_points, dtype = 'int')
+        cdef int[:] matrixCol = np.zeros(max_points, dtype = 'int')
+        
+        cdef int i_bc0 = 1
+        cdef int i_bcL = Lpnts - 2
+        
+        cdef int data_ind = 0
+        cdef int ind_1D_w
+        cdef int ind_1D_u
+        cdef int ind_1D_v
+        
+        cdef int i, j, m, n
+        
+        #Stresses are inputs to the formulas at places, so calculate those first
+        cdef double[:,:] sigx = np.zeros_like(np.array(w))
+        cdef double[:,:] sigy = np.zeros_like(np.array(w))
+        cdef double[:,:] sigy_y = np.zeros_like(np.array(w))
+        cdef double[:,:] tau = np.zeros_like(np.array(w))
+        cdef double ep1, ep1_y, ep2, ep2_y, gamma
+        
+        cdef double[:] partials = np.zeros(9)
+        
+        for i in range(Lpnts):
+            for j in range(rpnts):
+                if theory == 'Shiftable':
+                    ep1 = ux[i,j] + wx[i,j]**2/2 + wx[i,j]*w0x[i,j]
+                    ep2 = (1-w[i,j]/r-w0[i,j]/r)*vy[i,j] - w[i,j]/r + wy[i,j]**2/2 + wy[i,j]*w0y[i,j]
+                    gamma = vx[i,j] + uy[i,j] + wx[i,j]*wy[i,j] + w0x[i,j]*wy[i,j] + wx[i,j]*w0y[i,j]
+                    
+                    ep1_y = uxy[i,j] + wxy[i,j]*(wx[i,j] + w0x[i,j]) + wx[i,j]*w0xy[i,j]
+                    ep2_y = (1-w[i,j]/r-w0[i,j]/r)*vyy[i,j] - w0y[i,j]*vy[i,j]/r - (wy[i,j])*(vy[i,j]/r + 1/r - wyy[i,j] - w0yy[i,j]) + wyy[i,j]*w0y[i,j] 
+                elif theory == 'Donnell':
+                    ep1 = ux[i,j] + wx[i,j]**2/2 + wx[i,j]*w0x[i,j]
+                    ep2 = vy[i,j] - w[i,j]/r + wy[i,j]**2/2 + wy[i,j]*w0y[i,j]
+                    gamma = vx[i,j] + uy[i,j] + wx[i,j]*wy[i,j] + w0x[i,j]*wy[i,j] + wx[i,j]*w0y[i,j]
+                    
+                    ep1_y = uxy[i,j] + wxy[i,j]*(wx[i,j] + w0x[i,j]) + wx[i,j]*w0xy[i,j]
+                    ep2_y = vyy[i,j] - (wy[i,j])*(1/r - wyy[i,j] - w0yy[i,j]) + wyy[i,j]*w0y[i,j] 
+                elif theory == 'Total':
+                    #placeholder
+                    pass
+                    
+                sigx[i,j] = (ep1 + nu*ep2)/(1-nu**2)
+                sigy[i,j] = (nu*ep1 + ep2)/(1-nu**2)
+                tau[i,j] = gamma/(2*(1+nu))
+                
+                sigy_y[i,j] = (nu*ep1_y + ep2_y)/(1-nu**2)
+                
+        cdef double[:,:,:] sigx_derivs = np.zeros((1, Lpnts, rpnts))
+        sigx_derivs[0,:,:] = sigx
+        
+        cdef double[:,:,:] sigy_derivs = np.zeros((2, Lpnts, rpnts))
+        sigy_derivs[0,:,:] = sigy
+        sigy_derivs[1,:,:] = sigy_y
+        
+        cdef double[:,:,:] tau_derivs = np.zeros((1, Lpnts, rpnts))
+        tau_derivs[0,:,:] = tau
+        
+        for i in range(Lpnts):
+            #First get stencils for the current axial position (it varies when close to the edge)
+            #If in bulk use bulk stencils
+            if i > order_x and i < Lpnts - 1 - order_x:
+                si = sbi
+                stencils = bulk_stencils
+                #s_0, s_dx, s_dy, s_dxx, s_dxy, s_dyy, s_dxxxx, s_dxxyy, s_dyyyy = sb_0, sb_dx, sb_dy, sb_dxx, sb_dxy, sb_dyy, sb_dxxxx, sb_dxxyy, sb_dyyyy
+            #Otherwise generate edge stencils 
+            else:
+                #Boundary conditions for i = 0 and i = Lpnts-1 are calculated for the second point from the end
+                if i == 0:
+                    i_calc = i_bc0
+                elif i == Lpnts-1:
+                    i_calc = i_bcL
+                else:
+                    i_calc = i
+                
+                #Calculate the stencils for all the required derivatives
+                
+                s_0 = dgen.gen_stencil(0,0,i_calc)
+                
+                s_dx = dgen.gen_stencil(1,0,i_calc)
+                s_dy = dgen.gen_stencil(0,1,i_calc)
+                
+                s_dxx = dgen.gen_stencil(2,0,i_calc)
+                s_dxy = dgen.gen_stencil(1,1,i_calc)
+                s_dyy = dgen.gen_stencil(0,2,i_calc)
+                
+                s_dxxxx = dgen.gen_stencil(4,0,i_calc)
+                s_dxxyy = dgen.gen_stencil(2,2,i_calc)
+                s_dyyyy = dgen.gen_stencil(0,4,i_calc)
+                
+                edge_stencils[0,:,:] = s_0
+                
+                edge_stencils[1,:,:] = s_dx
+                edge_stencils[2,:,:] = s_dy
+                
+                edge_stencils[3,:,:] = s_dxx
+                edge_stencils[4,:,:] = s_dxy
+                edge_stencils[5,:,:] = s_dyy
+                
+                edge_stencils[6,:,:] = s_dxxxx
+                edge_stencils[7,:,:] = s_dxxyy
+                edge_stencils[8,:,:] = s_dyyyy
+                
+                stencils = edge_stencils
+                if i_calc <= order_x:
+                    si = np.arange(4+2*order_x) - i_calc
+                else:
+                    si = -np.arange(4+2*order_x)[::-1] + (Lpnts - 1 - i_calc)
+            
+            for j in range(rpnts):
+                #i corresponds to x, where x(i = 0) = -order_x * hx, x(i = order_x) = 0, x(i = Lpnts -1 + order_x) = L, x(i = Lpnts -1 + 2*order_x) = L + order_x*hx
+                #j corresponds to y, where y(j = 0) = 0 and y(j = rpnts - 1) = 2pi r - hy. 
+                
+                ind_1D_w = calc1DIndex(i,j, 0, Lpnts, rpnts)
+                ind_1D_u = calc1DIndex(i,j, 1, Lpnts, rpnts)
+                ind_1D_v = calc1DIndex(i,j, 2, Lpnts, rpnts)
+                
+                #first take care of boundary conditions
+                if i == 0:
+                    #w(x=0) = 0 or nu*r*load
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, calc1DIndex(i_bc0, j, 0, Lpnts, rpnts))
+                    
+                    #v(x=0) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_v, calc1DIndex(i_bc0, j, 2, Lpnts, rpnts))
+                    
+                    #u(x=0) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_u, calc1DIndex(i_bc0, j, 1, Lpnts, rpnts))
+                    
+                elif i == 1:
+                    #wx(x=L) = 0
+                    for m in range(si.size):
+                        i_ind = i_bc0 + si[m]
+                        for n in range(sj.size):
+                            j_ind = j+sj[n]
+                            if stencils[1][m,n] != 0:
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, stencils[1][m,n], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                
+                            #add the regular u and v stability equations
+                            consts[0] = D[i,j]
+                            #Calculate the partials for the current values of i,j,m,n 
+                            partials = calcPartials(partials, w_derivs[:,i,j], u_derivs[:,i,j], v_derivs[:,i,j], w0_derivs[:,i,j], sigx_derivs[:,i,j], sigy_derivs[:,i,j], tau_derivs[:,i,j], stencils[:,m,n], consts, theory)
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[3], ind_1D_u, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[4], ind_1D_u, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[5], ind_1D_u, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[6], ind_1D_v, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[7], ind_1D_v, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[8], ind_1D_v, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                
+                elif i == Lpnts - 2:
+                    #wx(x=L) = 0
+                    for m in range(si.size):
+                        i_ind = i_bcL + si[m]
+                        for n in range(sj.size):
+                            j_ind = j+sj[n]
+                            if stencils[1][m,n] != 0:
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, stencils[1][m,n], ind_1D_w, calc1DIndex(i_ind,j_ind, 0, Lpnts, rpnts))
+                                
+                            #add the regular u and v stability equations
+                            consts[0] = D[i,j]
+                            #Calculate the partials for the current values of i,j,m,n 
+                            partials = calcPartials(partials, w_derivs[:,i,j], u_derivs[:,i,j], v_derivs[:,i,j], w0_derivs[:,i,j], sigx_derivs[:,i,j], sigy_derivs[:,i,j], tau_derivs[:,i,j], stencils[:,m,n], consts, theory)
+                            
+                            #Add the partials to the Jacobian
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[3], ind_1D_u, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[4], ind_1D_u, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[5], ind_1D_u, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[6], ind_1D_v, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[7], ind_1D_v, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[8], ind_1D_v, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                
+                elif i == Lpnts - 1:
+                    #w(x=L) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, calc1DIndex(i_bcL, j, 0, Lpnts, rpnts))
+                    
+                    #v(x = L) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_v, calc1DIndex(i_bcL, j, 2, Lpnts, rpnts))
+                    
+                    if bc_type == 'disp':
+                        #u(x = L) = whatever it needs to be
+                        data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_u, calc1DIndex(i_bcL, j, 1, Lpnts, rpnts))
+                    elif bc_type == 'load':
+                        if j == 0:
+                            #Average applied load
+                            #sigx = (ep1 + nu ep2)/(1-nu**2)
+                            #For now only do Donnell and only specify the average load on the rim. 
+                            #Could equivalently (but more mathematically robustly) specify the average axial load in the entire system
+                            #ep1 = ux + wx^2/2 + wx w0x
+                            #ep2 = vy - w/r + wy^2/2 + wy w0y
+                            #vy, wy, wx are zero. So, simplifies to
+                            #sigx = (ux - nu w / r)/(1-nu^2)
+                            
+                            for m in range(si.size):
+                                i_ind = i_bcL + si[m]
+                                for n in range(sj.size):
+                                    j_ind = sj[n]
+                                    
+                                    sigx_w = (nu*s_0[m,n])/(1-nu**2)/rpnts
+                                    sigx_u = (s_dx[m,n])/(1-nu**2)/rpnts
+                                    
+                                    if sigx_u != 0:
+                                        for k in range(rpnts):
+                                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, sigx_u, ind_1D_u, calc1DIndex(i_ind, k+j_ind, 1, Lpnts, rpnts))
+                                    
+                                    if sigx_w != 0:
+                                        for k in range(rpnts):
+                                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, sigx_w, ind_1D_u, calc1DIndex(i_ind, k+j_ind, 0, Lpnts, rpnts))
+                        else:
+                            #u(x=L, y) - u(x=L, y+dy) = 0
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_u, calc1DIndex(i_bcL, j-1, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, -1, ind_1D_u, calc1DIndex(i_bcL, j, 1, Lpnts, rpnts))
+                    
+                else:
+                    
+                    for m in range(si.size):
+                        i_ind = i+si[m]
+                        for n in range(sj.size):
+                            j_ind = j+sj[n]
+                            
+                            consts[0] = D[i,j]
+                            #Calculate the partials for the current values of i,j,m,n 
+                            partials = calcPartials(partials, w_derivs[:,i,j], u_derivs[:,i,j], v_derivs[:,i,j], w0_derivs[:,i,j], sigx_derivs[:,i,j], sigy_derivs[:,i,j], tau_derivs[:,i,j], stencils[:,m,n], consts, theory)
+                            
+                            #Add the partials to the Jacobian
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[0], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[1], ind_1D_w, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[2], ind_1D_w, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[3], ind_1D_u, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[4], ind_1D_u, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[5], ind_1D_u, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[6], ind_1D_v, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[7], ind_1D_v, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[8], ind_1D_v, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+        
+        #t1 = time.time()
+        #print("Took " + str(t1-t0) + " seconds to get the sparse jacobian matrix rows and cols.")
+        
+        #zero_inds = np.where(np.array(matrixData) == 0)
+        
+        #print(zero_inds[0])
+        #print(data_ind)
+        
+        #matrixData = np.delete(matrixData, zero_inds)
+        #matrixRow = np.delete(matrixRow, zero_inds)
+        #matrixCol = np.delete(matrixCol, zero_inds)
+        
+        matrixData = matrixData[0:data_ind]
+        matrixRow = matrixRow[0:data_ind]
+        matrixCol = matrixCol[0:data_ind]
+        
+        matrix = (matrixData, (matrixRow, matrixCol))
+        #print(3*Lpnts*rpnts)
+        #print(max(matrixCol))
+        #print(max(matrixRow))
+        #print(min(matrixCol))
+        #print(min(matrixRow))
+        
+        #t2 = time.time()
+        #print("Took " + str(t2-t1) + " seconds to delete shit.")
+        
+        jacobian = csc_matrix(matrix, shape = (3*Lpnts*rpnts, 3*Lpnts*rpnts))
+        jacobian.sort_indices() #Sort indices for pypardiso compatibility
+        
+        #t3 = time.time()
+        #print("Took " + str(t3-t1) + " seconds to create the sparse jacobian matrix.")
+        
+        return jacobian
+    
+    def calcJacobTVarNew(self, double[:,:] w, double[:,:] u, double[:,:] v, bc_type = 'disp', theory = 'Shiftable'):
+        
+        t0 = time.time()
+        
+        #If I really want to make this faster, then could parallel process it easily, since each i/j coordinate is independent
+        cdef double r = self.r
+        cdef double L = self.L
+        cdef double nu = self.nu
+        
+        cdef double[:] consts = np.array([nu, r, L])
+        
+        cdef int Lpnts = w.shape[0]
+        cdef int rpnts = w.shape[1]
+        
+        dgen = self.dgen
+        
+        cdef int order_x = dgen.order_x
+        cdef int order_y = dgen.order_y
+        
+        #Initialize deriv arrays
+        cdef double[:,:] wx = dgen.deriv(np.array(w), 1, 0)
+        cdef double[:,:] wy = dgen.deriv(np.array(w), 0, 1)
+        cdef double[:,:] wxx = dgen.deriv(np.array(w), 2, 0)
+        cdef double[:,:] wxy = dgen.deriv(np.array(w), 1, 1)
+        cdef double[:,:] wyy = dgen.deriv(np.array(w), 0, 2)
+        
+        cdef double[:,:] ux = dgen.deriv(np.array(u), 1, 0)
+        cdef double[:,:] uy = dgen.deriv(np.array(u), 0, 1)
+        cdef double[:,:] uxx = dgen.deriv(np.array(u), 2, 0)
+        cdef double[:,:] uxy = dgen.deriv(np.array(u), 1, 1)
+        cdef double[:,:] uyy = dgen.deriv(np.array(u), 0, 2)
+        
+        cdef double[:,:] vx = dgen.deriv(np.array(v), 1, 0)
+        cdef double[:,:] vy = dgen.deriv(np.array(v), 0, 1)
+        cdef double[:,:] vxx = dgen.deriv(np.array(v), 2, 0)
+        cdef double[:,:] vxy = dgen.deriv(np.array(v), 1, 1)
+        cdef double[:,:] vyy = dgen.deriv(np.array(v), 0, 2)
+        
+        cdef double[:,:] w0 = self.w0_derivs[0]
+        cdef double[:,:] w0x = self.w0_derivs[1]
+        cdef double[:,:] w0y = self.w0_derivs[2]
+        cdef double[:,:] w0xx = self.w0_derivs[3]
+        cdef double[:,:] w0xy = self.w0_derivs[4]
+        cdef double[:,:] w0yy = self.w0_derivs[5]
+        
+        #Get the w, w0, u, v deriv arrays
+        cdef double[:,:,:] w_derivs = np.zeros((6, Lpnts, rpnts))
+        w_derivs[0,:,:] = w
+        w_derivs[1,:,:] = wx
+        w_derivs[2,:,:] = wy
+        w_derivs[3,:,:] = wxx
+        w_derivs[4,:,:] = wxy
+        w_derivs[5,:,:] = wyy
+        
+        cdef double[:,:,:] u_derivs = np.zeros((5, Lpnts, rpnts))
+        u_derivs[0,:,:] = ux
+        u_derivs[1,:,:] = uy
+        u_derivs[2,:,:] = uxx
+        u_derivs[3,:,:] = uxy
+        u_derivs[4,:,:] = uyy
+        
+        cdef double[:,:,:] v_derivs = np.zeros((5, Lpnts, rpnts))
+        v_derivs[0,:,:] = vx
+        v_derivs[1,:,:] = vy
+        v_derivs[2,:,:] = vxx
+        v_derivs[3,:,:] = vxy
+        v_derivs[4,:,:] = vyy
+        
+        cdef double[:,:,:] w0_derivs = self.w0_derivs
+        cdef double[:,:,:] t_derivs = self.t_derivs
+        
+        #Initialize stencils
+        
+        cdef double[:,:] s_0
+        cdef double[:,:] s_dx
+        cdef double[:,:] s_dy
+        cdef double[:,:] s_dxx
+        cdef double[:,:] s_dxy
+        cdef double[:,:] s_dyy
+        cdef double[:,:] s_dxxx
+        cdef double[:,:] s_dxxy
+        cdef double[:,:] s_dxyy
+        cdef double[:,:] s_dyyy
+        cdef double[:,:] s_dxxxx
+        cdef double[:,:] s_dxxyy
+        cdef double[:,:] s_dyyyy
+        
+        cdef double[:,:,:] stencils
+        
+        #Calculate the stencils for all the required derivatives in the bulk 
+        #Edge cases are calculated in the loop
+        
+        cdef double[:,:] sb_0 = dgen.gen_stencil(0,0)
+        
+        cdef double[:,:] sb_dx = dgen.gen_stencil(1,0)
+        cdef double[:,:] sb_dy = dgen.gen_stencil(0,1)
+        
+        cdef double[:,:] sb_dxx = dgen.gen_stencil(2,0)
+        cdef double[:,:] sb_dxy = dgen.gen_stencil(1,1)
+        cdef double[:,:] sb_dyy = dgen.gen_stencil(0,2)
+        
+        cdef double[:,:] sb_dxxx = dgen.gen_stencil(3,0)
+        cdef double[:,:] sb_dxxy = dgen.gen_stencil(2,1)
+        cdef double[:,:] sb_dxyy = dgen.gen_stencil(1,2)
+        cdef double[:,:] sb_dyyy = dgen.gen_stencil(0,3)
+        
+        cdef double[:,:] sb_dxxxx = dgen.gen_stencil(4,0)
+        cdef double[:,:] sb_dxxyy = dgen.gen_stencil(2,2)
+        cdef double[:,:] sb_dyyyy = dgen.gen_stencil(0,4)
+        
+        cdef double[:,:,:] bulk_stencils = np.zeros((13, 3+2*order_x, 3+2*order_y))
+        bulk_stencils[0,:,:] = sb_0
+        
+        bulk_stencils[1,:,:] = sb_dx
+        bulk_stencils[2,:,:] = sb_dy
+        
+        bulk_stencils[3,:,:] = sb_dxx
+        bulk_stencils[4,:,:] = sb_dxy
+        bulk_stencils[5,:,:] = sb_dyy
+        
+        bulk_stencils[6,:,:] = sb_dxxx
+        bulk_stencils[7,:,:] = sb_dxxy
+        bulk_stencils[8,:,:] = sb_dxyy
+        bulk_stencils[9,:,:] = sb_dyyy
+        
+        bulk_stencils[10,:,:] = sb_dxxxx
+        bulk_stencils[11,:,:] = sb_dxxyy
+        bulk_stencils[12,:,:] = sb_dyyyy
+        
+        cdef double[:,:,:] edge_stencils = np.zeros((13, 4+2*order_x, 3+2*order_y))
+        
+        cdef int[:] si
+        cdef int[:] sbi = np.arange(3+2*order_x) - order_x - 1
+        
+        cdef int[:] sj = np.arange(3+2*order_y) - order_y - 1
+        
+        cdef int max_points = (4+2*order_x)*(4+2*order_y)*w.size*3*3
+        
+        cdef double[:] matrixData = np.zeros(max_points, dtype = 'float')
+        cdef int[:] matrixRow = np.arange(max_points, dtype = 'int')
+        cdef int[:] matrixCol = np.zeros(max_points, dtype = 'int')
+        
+        cdef int i_bc0 = 1
+        cdef int i_bcL = Lpnts - 2
+        
+        cdef int data_ind = 0
+        cdef int ind_1D_w
+        cdef int ind_1D_u
+        cdef int ind_1D_v
+        
+        cdef int i, j, m, n
+        
+        #Stresses are inputs to the formulas at places, so calculate those first
+        cdef double[:,:] sigx = np.zeros_like(np.array(w))
+        cdef double[:,:] sigy = np.zeros_like(np.array(w))
+        cdef double[:,:] sigy_y = np.zeros_like(np.array(w))
+        cdef double[:,:] tau = np.zeros_like(np.array(w))
+        cdef double ep1, ep1_y, ep2, ep2_y, gamma
+        
+        cdef double[:] partials = np.zeros(9)
+        
+        for i in range(Lpnts):
+            for j in range(rpnts):
+                if theory == 'Shiftable':
+                    ep1 = ux[i,j] + wx[i,j]**2/2 + wx[i,j]*w0x[i,j]
+                    ep2 = (1-w[i,j]/r-w0[i,j]/r)*vy[i,j] - w[i,j]/r + wy[i,j]**2/2 + wy[i,j]*w0y[i,j]
+                    gamma = vx[i,j] + uy[i,j] + wx[i,j]*wy[i,j] + w0x[i,j]*wy[i,j] + wx[i,j]*w0y[i,j]
+                    
+                    ep1_y = uxy[i,j] + wxy[i,j]*(wx[i,j] + w0x[i,j]) + wx[i,j]*w0xy[i,j]
+                    ep2_y = (1-w[i,j]/r-w0[i,j]/r)*vyy[i,j] - w0y[i,j]*vy[i,j]/r - (wy[i,j])*(vy[i,j]/r + 1/r - wyy[i,j] - w0yy[i,j]) + wyy[i,j]*w0y[i,j] 
+                elif theory == 'Donnell':
+                    ep1 = ux[i,j] + wx[i,j]**2/2 + wx[i,j]*w0x[i,j]
+                    ep2 = vy[i,j] - w[i,j]/r + wy[i,j]**2/2 + wy[i,j]*w0y[i,j]
+                    gamma = vx[i,j] + uy[i,j] + wx[i,j]*wy[i,j] + w0x[i,j]*wy[i,j] + wx[i,j]*w0y[i,j]
+                    
+                    ep1_y = uxy[i,j] + wxy[i,j]*(wx[i,j] + w0x[i,j]) + wx[i,j]*w0xy[i,j]
+                    ep2_y = vyy[i,j] - (wy[i,j])*(1/r - wyy[i,j] - w0yy[i,j]) + wyy[i,j]*w0y[i,j] 
+                elif theory == 'Total':
+                    #placeholder
+                    pass
+                    
+                sigx[i,j] = (ep1 + nu*ep2)/(1-nu**2)
+                sigy[i,j] = (nu*ep1 + ep2)/(1-nu**2)
+                tau[i,j] = gamma/(2*(1+nu))
+                
+                sigy_y[i,j] = (nu*ep1_y + ep2_y)/(1-nu**2)
+                
+        cdef double[:,:,:] sigx_derivs = np.zeros((1, Lpnts, rpnts))
+        sigx_derivs[0,:,:] = sigx
+        
+        cdef double[:,:,:] sigy_derivs = np.zeros((2, Lpnts, rpnts))
+        sigy_derivs[0,:,:] = sigy
+        sigy_derivs[1,:,:] = sigy_y
+        
+        cdef double[:,:,:] tau_derivs = np.zeros((1, Lpnts, rpnts))
+        tau_derivs[0,:,:] = tau
+        
+        for i in range(Lpnts):
+            #First get stencils for the current axial position (it varies when close to the edge)
+            #If in bulk use bulk stencils
+            if i > order_x and i < Lpnts - 1 - order_x:
+                si = sbi
+                stencils = bulk_stencils
+                #s_0, s_dx, s_dy, s_dxx, s_dxy, s_dyy, s_dxxxx, s_dxxyy, s_dyyyy = sb_0, sb_dx, sb_dy, sb_dxx, sb_dxy, sb_dyy, sb_dxxxx, sb_dxxyy, sb_dyyyy
+            #Otherwise generate edge stencils 
+            else:
+                #Boundary conditions for i = 0 and i = Lpnts-1 are calculated for the second point from the end
+                if i == 0:
+                    i_calc = i_bc0
+                elif i == Lpnts-1:
+                    i_calc = i_bcL
+                else:
+                    i_calc = i
+                
+                #Calculate the stencils for all the required derivatives
+                
+                s_0 = dgen.gen_stencil(0,0,i_calc)
+                
+                s_dx = dgen.gen_stencil(1,0,i_calc)
+                s_dy = dgen.gen_stencil(0,1,i_calc)
+                
+                s_dxx = dgen.gen_stencil(2,0,i_calc)
+                s_dxy = dgen.gen_stencil(1,1,i_calc)
+                s_dyy = dgen.gen_stencil(0,2,i_calc)
+                
+                s_dxxx = dgen.gen_stencil(3,0,i_calc)
+                s_dxxy = dgen.gen_stencil(2,1,i_calc)
+                s_dxyy = dgen.gen_stencil(1,2,i_calc)
+                s_dyyy = dgen.gen_stencil(0,3,i_calc)
+                
+                s_dxxxx = dgen.gen_stencil(4,0,i_calc)
+                s_dxxyy = dgen.gen_stencil(2,2,i_calc)
+                s_dyyyy = dgen.gen_stencil(0,4,i_calc)
+                
+                edge_stencils[0,:,:] = s_0
+                
+                edge_stencils[1,:,:] = s_dx
+                edge_stencils[2,:,:] = s_dy
+                
+                edge_stencils[3,:,:] = s_dxx
+                edge_stencils[4,:,:] = s_dxy
+                edge_stencils[5,:,:] = s_dyy
+                
+                edge_stencils[6,:,:] = s_dxxx
+                edge_stencils[7,:,:] = s_dxxy
+                edge_stencils[8,:,:] = s_dxyy
+                edge_stencils[9,:,:] = s_dyyy
+        
+                edge_stencils[10,:,:] = s_dxxxx
+                edge_stencils[11,:,:] = s_dxxyy
+                edge_stencils[12,:,:] = s_dyyyy
+                
+                stencils = edge_stencils
+                if i_calc <= order_x:
+                    si = np.arange(4+2*order_x) - i_calc
+                else:
+                    si = -np.arange(4+2*order_x)[::-1] + (Lpnts - 1 - i_calc)
+            
+            for j in range(rpnts):
+                #i corresponds to x, where x(i = 0) = -order_x * hx, x(i = order_x) = 0, x(i = Lpnts -1 + order_x) = L, x(i = Lpnts -1 + 2*order_x) = L + order_x*hx
+                #j corresponds to y, where y(j = 0) = 0 and y(j = rpnts - 1) = 2pi r - hy. 
+                
+                ind_1D_w = calc1DIndex(i,j, 0, Lpnts, rpnts)
+                ind_1D_u = calc1DIndex(i,j, 1, Lpnts, rpnts)
+                ind_1D_v = calc1DIndex(i,j, 2, Lpnts, rpnts)
+                
+                #first take care of boundary conditions
+                if i == 0:
+                    #w(x=0) = 0 or nu*r*load
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, calc1DIndex(i_bc0, j, 0, Lpnts, rpnts))
+                    
+                    #v(x=0) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_v, calc1DIndex(i_bc0, j, 2, Lpnts, rpnts))
+                    
+                    #u(x=0) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_u, calc1DIndex(i_bc0, j, 1, Lpnts, rpnts))
+                    
+                elif i == 1:
+                    #wx(x=L) = 0
+                    for m in range(si.size):
+                        i_ind = i_bc0 + si[m]
+                        for n in range(sj.size):
+                            j_ind = j+sj[n]
+                            if stencils[1][m,n] != 0:
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, stencils[1][m,n], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                
+                            #add the regular u and v stability equations
+                            
+                            #Calculate the partials for the current values of i,j,m,n 
+                            partials = calcPartialsTVar(partials, w_derivs[:,i,j], u_derivs[:,i,j], v_derivs[:,i,j], w0_derivs[:,i,j], t_derivs[:,i,j], sigx_derivs[:,i,j], sigy_derivs[:,i,j], tau_derivs[:,i,j], stencils[:,m,n], consts, theory)
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[3], ind_1D_u, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[4], ind_1D_u, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[5], ind_1D_u, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[6], ind_1D_v, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[7], ind_1D_v, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[8], ind_1D_v, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                
+                elif i == Lpnts - 2:
+                    #wx(x=L) = 0
+                    for m in range(si.size):
+                        i_ind = i_bcL + si[m]
+                        for n in range(sj.size):
+                            j_ind = j+sj[n]
+                            if stencils[1][m,n] != 0:
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, stencils[1][m,n], ind_1D_w, calc1DIndex(i_ind,j_ind, 0, Lpnts, rpnts))
+                                
+                            #add the regular u and v stability equations
+                            
+                            #Calculate the partials for the current values of i,j,m,n 
+                            partials = calcPartialsTVar(partials, w_derivs[:,i,j], u_derivs[:,i,j], v_derivs[:,i,j], w0_derivs[:,i,j], t_derivs[:,i,j], sigx_derivs[:,i,j], sigy_derivs[:,i,j], tau_derivs[:,i,j], stencils[:,m,n], consts, theory)
+                            
+                            #Add the partials to the Jacobian
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[3], ind_1D_u, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[4], ind_1D_u, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[5], ind_1D_u, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[6], ind_1D_v, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[7], ind_1D_v, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[8], ind_1D_v, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                
+                elif i == Lpnts - 1:
+                    #w(x=L) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, calc1DIndex(i_bcL, j, 0, Lpnts, rpnts))
+                    
+                    #v(x = L) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_v, calc1DIndex(i_bcL, j, 2, Lpnts, rpnts))
+                    
+                    if bc_type == 'disp':
+                        #u(x = L) = whatever it needs to be
+                        data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_u, calc1DIndex(i_bcL, j, 1, Lpnts, rpnts))
+                    elif bc_type == 'load':
+                        if j == 0:
+                            #Average applied load
+                            #sigx = (ep1 + nu ep2)/(1-nu**2)
+                            #For now only do Donnell and only specify the average load on the rim. 
+                            #Could equivalently (but more mathematically robustly) specify the average axial load in the entire system
+                            #ep1 = ux + wx^2/2 + wx w0x
+                            #ep2 = vy - w/r + wy^2/2 + wy w0y
+                            #vy, wy, wx are zero. So, simplifies to
+                            #sigx = (ux - nu w / r)/(1-nu^2)
+                            
+                            for m in range(si.size):
+                                i_ind = i_bcL + si[m]
+                                for n in range(sj.size):
+                                    j_ind = sj[n]
+                                    
+                                    sigx_w = (nu*s_0[m,n])/(1-nu**2)/rpnts
+                                    sigx_u = (s_dx[m,n])/(1-nu**2)/rpnts
+                                    
+                                    if sigx_u != 0:
+                                        for k in range(rpnts):
+                                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, sigx_u, ind_1D_u, calc1DIndex(i_ind, k+j_ind, 1, Lpnts, rpnts))
+                                    
+                                    if sigx_w != 0:
+                                        for k in range(rpnts):
+                                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, sigx_w, ind_1D_u, calc1DIndex(i_ind, k+j_ind, 0, Lpnts, rpnts))
+                        else:
+                            #u(x=L, y) - u(x=L, y+dy) = 0
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_u, calc1DIndex(i_bcL, j-1, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, -1, ind_1D_u, calc1DIndex(i_bcL, j, 1, Lpnts, rpnts))
+                    
+                else:
+                    
+                    for m in range(si.size):
+                        i_ind = i+si[m]
+                        for n in range(sj.size):
+                            j_ind = j+sj[n]
+                            
+                            #Calculate the partials for the current values of i,j,m,n 
+                            partials = calcPartialsTVar(partials, w_derivs[:,i,j], u_derivs[:,i,j], v_derivs[:,i,j], w0_derivs[:,i,j], t_derivs[:,i,j], sigx_derivs[:,i,j], sigy_derivs[:,i,j], tau_derivs[:,i,j], stencils[:,m,n], consts, theory)
+                            
+                            #Add the partials to the Jacobian
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[0], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[1], ind_1D_w, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[2], ind_1D_w, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[3], ind_1D_u, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[4], ind_1D_u, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[5], ind_1D_u, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[6], ind_1D_v, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[7], ind_1D_v, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[8], ind_1D_v, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+        
+        #t1 = time.time()
+        #print("Took " + str(t1-t0) + " seconds to get the sparse jacobian matrix rows and cols.")
+        
+        #zero_inds = np.where(np.array(matrixData) == 0)
+        
+        #print(zero_inds[0])
+        #print(data_ind)
+        
+        #matrixData = np.delete(matrixData, zero_inds)
+        #matrixRow = np.delete(matrixRow, zero_inds)
+        #matrixCol = np.delete(matrixCol, zero_inds)
+        
+        matrixData = matrixData[0:data_ind]
+        matrixRow = matrixRow[0:data_ind]
+        matrixCol = matrixCol[0:data_ind]
+        
+        matrix = (matrixData, (matrixRow, matrixCol))
+        #print(3*Lpnts*rpnts)
+        #print(max(matrixCol))
+        #print(max(matrixRow))
+        #print(min(matrixCol))
+        #print(min(matrixRow))
+        
+        #t2 = time.time()
+        #print("Took " + str(t2-t1) + " seconds to delete shit.")
+        
+        jacobian = csc_matrix(matrix, shape = (3*Lpnts*rpnts, 3*Lpnts*rpnts))
+        jacobian.sort_indices() #Sort indices for pypardiso compatibility
+        
+        #t3 = time.time()
+        #print("Took " + str(t3-t1) + " seconds to create the sparse jacobian matrix.")
+        
+        return jacobian
+
+
+    def calcJacobTVar(self, double[:,:] w, double[:,:] u, double[:,:] v, bc_type = 'disp'):
+        t0 = time.time()
+        
+        #If I really want to make this faster, then could parallel process it easily, since each i/j coordinate is independent
+        cdef double r = self.r
+        cdef double L = self.L
+        cdef double nu = self.nu
+        
+        cdef int Lpnts = w.shape[0]
+        cdef int rpnts = w.shape[1]
+        
+        dgen = self.dgen
+        
+        cdef int order_x = dgen.order_x
+        cdef int order_y = dgen.order_y
+        
+        #Initialize deriv arrays
+        cdef double[:,:] wx = dgen.deriv(np.array(w), 1, 0)
+        cdef double[:,:] wy = dgen.deriv(np.array(w), 0, 1)
+        cdef double[:,:] wxx = dgen.deriv(np.array(w), 2, 0)
+        cdef double[:,:] wxy = dgen.deriv(np.array(w), 1, 1)
+        cdef double[:,:] wyy = dgen.deriv(np.array(w), 0, 2)
+        cdef double[:,:] ux = dgen.deriv(np.array(u), 1, 0)
+        cdef double[:,:] uy = dgen.deriv(np.array(u), 0, 1)
+        cdef double[:,:] vx = dgen.deriv(np.array(v), 1, 0)
+        cdef double[:,:] vy = dgen.deriv(np.array(v), 0, 1)
+        
+        #Initialize imperfection arrays
+        cdef double[:,:] w0 = self.w0_derivs[0]
+        cdef double[:,:] w0x = self.w0_derivs[1]
+        cdef double[:,:] w0y = self.w0_derivs[2]
+        cdef double[:,:] w0xx = self.w0_derivs[3]
+        cdef double[:,:] w0xy = self.w0_derivs[4]
+        cdef double[:,:] w0yy = self.w0_derivs[5]
+        
+        cdef double[:,:] t = self.t_derivs[0]
+        cdef double[:,:] tx = self.t_derivs[1]
+        cdef double[:,:] ty = self.t_derivs[2]
+        cdef double[:,:] txx = self.t_derivs[3]
+        cdef double[:,:] txy = self.t_derivs[4]
+        cdef double[:,:] tyy = self.t_derivs[5]
+        
+        #Initialize stencils
+        cdef double[:,:] s_0
+        cdef double[:,:] s_dx
+        cdef double[:,:] s_dy
+        cdef double[:,:] s_dxx
+        cdef double[:,:] s_dxy
+        cdef double[:,:] s_dyy
+        cdef double[:,:] s_dxxxx
+        cdef double[:,:] s_dxxyy
+        cdef double[:,:] s_dyyyy
+        
+        #Calculate the stencils for all the required derivatives in the bulk 
+        #Edge cases are calculated in the loop
+        cdef double[:,:] sb_0 = dgen.gen_stencil(0,0)
+        
+        cdef double[:,:] sb_dx = dgen.gen_stencil(1,0)
+        cdef double[:,:] sb_dy = dgen.gen_stencil(0,1)
+        
+        cdef double[:,:] sb_dxx = dgen.gen_stencil(2,0)
+        cdef double[:,:] sb_dxy = dgen.gen_stencil(1,1)
+        cdef double[:,:] sb_dyy = dgen.gen_stencil(0,2)
+        
+        cdef double[:,:] sb_dxxxx = dgen.gen_stencil(4,0)
+        cdef double[:,:] sb_dxxyy = dgen.gen_stencil(2,2)
+        cdef double[:,:] sb_dyyyy = dgen.gen_stencil(0,4)
+        
+        cdef int[:] si
+        cdef int[:] sbi = np.arange(3+2*order_x) - order_x - 1
+        
+        cdef int[:] sj = np.arange(3+2*order_y) - order_y - 1
+        '''
+        #Initialize stencils for boundary conditions
+        cdef double[:,:] s1_dxx = dgen.gen_stencil(2,0, 1)
+        cdef double[:,:] s1_dx = dgen.gen_stencil(1,0, 1)
+        cdef double[:,:] s1_0 = dgen.gen_stencil(0,0, 1)
+    
+        cdef int[:] s1i = np.arange(4+2*order_x) - 1
+    
+        cdef double[:,:] sm1_dxx = dgen.gen_stencil(2,0, Lpnts-2)
+        cdef double[:,:] sm1_dxy = dgen.gen_stencil(1,1, Lpnts-2)
+        cdef double[:,:] sm1_dyy = dgen.gen_stencil(0,2, Lpnts-2)
+        cdef double[:,:] sm1_dx = dgen.gen_stencil(1,0, Lpnts-2)
+        cdef double[:,:] sm1_dy = dgen.gen_stencil(0,1, Lpnts-2)
+        cdef double[:,:] sm1_0 = dgen.gen_stencil(0,0, Lpnts-2)
+    
+        cdef int[:] sm1i = -np.arange(4+2*order_x)[::-1] + 1
+        '''
+        #Initialize stencils 
+        cdef double w_s_w
+        cdef double w_s_u
+        cdef double w_s_v
+        
+        cdef double u_s_w
+        cdef double u_s_u
+        cdef double u_s_v
+        
+        cdef double v_s_w
+        cdef double v_s_u
+        cdef double v_s_v
+        
+        cdef int max_points = (4+2*order_x)*(4+2*order_y)*w.size*3*3
+        
+        cdef double[:] matrixData = np.zeros(max_points, dtype = 'float')
+        cdef int[:] matrixRow = np.arange(max_points, dtype = 'int')
+        cdef int[:] matrixCol = np.zeros(max_points, dtype = 'int')
+        
+        cdef int i_bc0 = 1
+        cdef int i_bcL = Lpnts - 2
+        
+        cdef int data_ind = 0
+        cdef int ind_1D_w
+        cdef int ind_1D_u
+        cdef int ind_1D_v
+        
+        cdef int i, j, m, n
+        
+        for i in range(Lpnts):
+            #If in bulk use bulk stencils
+            if i > order_x and i < Lpnts - 1 - order_x:
+                si = sbi
+                s_0, s_dx, s_dy, s_dxx, s_dxy, s_dyy, s_dxxxx, s_dxxyy, s_dyyyy = sb_0, sb_dx, sb_dy, sb_dxx, sb_dxy, sb_dyy, sb_dxxxx, sb_dxxyy, sb_dyyyy
+            #Otherwise generate edge stencils 
+            else:
+                #Boundary conditions for i = 0 and i = Lpnts-1 are calculated for the second point from the end
+                if i == 0:
+                    i_calc = i_bc0
+                elif i == Lpnts-1:
+                    i_calc = i_bcL
+                else:
+                    i_calc = i
+                    
+                #Calculate the stencils for all the required derivatives
+                s_0 = dgen.gen_stencil(0,0,i_calc)
+                
+                s_dx = dgen.gen_stencil(1,0,i_calc)
+                s_dy = dgen.gen_stencil(0,1,i_calc)
+                
+                s_dxx = dgen.gen_stencil(2,0,i_calc)
+                s_dxy = dgen.gen_stencil(1,1,i_calc)
+                s_dyy = dgen.gen_stencil(0,2,i_calc)
+                
+                s_dxxx = dgen.gen_stencil(3,0,i_calc)
+                s_dxxy = dgen.gen_stencil(2,1,i_calc)
+                s_dxyy = dgen.gen_stencil(1,2,i_calc)
+                s_dyyy = dgen.gen_stencil(0,3,i_calc)
+                
+                s_dxxxx = dgen.gen_stencil(4,0,i_calc)
+                s_dxxyy = dgen.gen_stencil(2,2,i_calc)
+                s_dyyyy = dgen.gen_stencil(0,4,i_calc)
+                
+                if i_calc <= order_x:
+                    si = np.arange(4+2*order_x) - i_calc
+                else:
+                    si = -np.arange(4+2*order_x)[::-1] + (Lpnts - 1 - i_calc)
+        
+            for j in range(rpnts):
+                #i corresponds to x, where x(i = 0) = -order_x * hx, x(i = order_x) = 0, x(i = Lpnts -1 + order_x) = L, x(i = Lpnts -1 + 2*order_x) = L + order_x*hx
+                #j corresponds to y, where y(j = 0) = 0 and y(j = rpnts - 1) = 2pi r - hy. 
+                
+                ind_1D_w = calc1DIndex(i,j, 0, Lpnts, rpnts)
+                ind_1D_u = calc1DIndex(i,j, 1, Lpnts, rpnts)
+                ind_1D_v = calc1DIndex(i,j, 2, Lpnts, rpnts)
+                
+                #first take care of boundary conditions
+                if i == 0:
+                    #w(x=0) = 0 or nu*r*load
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, calc1DIndex(i_bc0, j, 0, Lpnts, rpnts))
+                
+                    #u(x=0) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_u, calc1DIndex(i_bc0, j, 1, Lpnts, rpnts))
+                    
+                    #v(x=0) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_v, calc1DIndex(i_bc0, j, 2, Lpnts, rpnts))
+                    
+                elif i == 1:
+                    #wx(x=L) = 0
+                    for m in range(si.size):
+                        for n in range(sj.size):
+                            if s_dx[m,n] != 0:
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx[m,n], ind_1D_w, calc1DIndex(i_bc0 + si[m],j + sj[n], 0, Lpnts, rpnts))
+                                
+                    if bc_type == 'load':
+                        #Set ux load boundary condition
+                        #ux(x=L) = ((1-nu**2)*load - wx[1, :]**2/2 - wx[1, :]*w0x[1, :] + nu * w[1, :] / r)
+                        #vx(x=L) = 0
+                        for m in range(si.size):
+                            i_ind = i_bc0 + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                if s_dx[m,n] != 0:
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx[m,n], ind_1D_u, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx[m,n]*(wx[i_bc0,j]+w0x[i_bc0,j]), ind_1D_u, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx[m,n], ind_1D_v, calc1DIndex(i_bc0 + si[m],j + sj[n], 2, Lpnts, rpnts))
+                                
+                                if s_0[m,n] != 0:
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, -nu*s_0[m,n]/r, ind_1D_u, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                    
+                    elif bc_type == 'disp':
+                        #ux = regular diffeq (no ux requirement if bc_type is disp)
+                        #same with v
+                        for m in range(si.size):
+                            i_ind = i_bc0 + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                #u stability equation (only w has nonlinear contributions
+                                #(uyy + vxy)/(2*(1+nu)) + (nu*vxy + uxx)/(1-nu**2) -nu*wx/r(1-nu**2) + (w0x*wxx + wx*(wxx+w0xx) + nu*(w0y*wxy + wy*(wxy + w0xy)))/(1-nu**2)
+                                #+ (w0yy*wx + wyy*(wx + w0x) + w0xy*wy + wxy*(wy + w0y))/(2(1+nu))
+                                u_s_w = t[i,j]*(-nu*s_dx[m,n]/(r*(1-nu**2)) + (s_dxx[m,n]*(wx[i,j] + w0x[i,j]) + s_dx[m,n]*(wxx[i,j] + w0xx[i,j]) + nu*(s_dxy[m,n]*(wy[i,j] + w0y[i,j]) + s_dy[m,n]*(wxy[i,j] + w0xy[i,j])))/(1-nu**2))
+                                u_s_w += t[i,j]*(s_dx[m,n]*(wyy[i,j] + w0yy[i,j]) + s_dyy[m,n]*(wx[i,j] +w0x[i,j]) + s_dy[m,n]*(wxy[i,j] + w0xy[i,j]) + s_dxy[m,n]*(wy[i,j] + w0y[i,j]))/(2*(1+nu))
+                                
+                                u_s_u = t[i,j]*(s_dxx[m,n]/(1-nu**2) + s_dyy[m,n]/(2*(1+nu)))
+                                u_s_v = t[i,j]*(s_dxy[m,n]/(2*(1-nu)))
+                                
+                                #sigx = (ux + wx**2/2 + wx w0x + nu (vy - w/r + wy**2/2 + wy w0y )(1-nu**2)
+                                #sigy = (nu*(ux + wx**2/2 + wx w0x) + (vy - w/r + wy**2/2 + wy w0y )(1-nu**2)
+                                #tau = (vx + uy + wx wy + w0x wy + wx w0y)/(2*(1+nu))
+                                
+                                #Thickness variation terms are tx sigmax + ty tauxy
+                                u_s_w += tx[i,j]*(s_dx[m,n]*(wx[i,j]+w0x[i,j]) + nu*(-s_0[m,n]/r + s_dy[m,n]*(wy[i,j]+w0y[i,j])))/(1-nu**2)
+                                u_s_w += ty[i,j]*(s_dx[m,n]*(wy[i,j]+w0y[i,j]) + s_dy[m,n]*(wx[i,j]+w0x[i,j]))/(2*(1+nu))
+                                
+                                u_s_u += tx[i,j]*s_dx[m,n]/(1-nu**2) + ty[i,j]*s_dy[m,n]/(2*(1+nu))
+                                
+                                u_s_v += tx[i,j]*nu*s_dy[m,n]/(1-nu**2) + ty[i,j]*s_dx[m,n]/(2*(1+nu))
+                                
+                                #v stability equation (again, only w has nonlinear contributions)
+                                # (vxx + uxy)/(2*(1+nu)) + (vyy + nu*uxy)/(1-nu**2) - wy/r(1-nu**2) + (w0y*wyy + wy*(wyy + w0yy) + nu*(w0xy*wx + wxy*(wx + w0x))))/(1-nu**2)
+                                # + (w0x*wxy + wx*(wxy + w0xy) + w0xx*wy + wxx*(wy + w0y))/(2(1+nu))
+                                v_s_w = t[i,j]*(-s_dy[m,n]/(r*(1-nu**2)) + (s_dyy[m,n]*(wy[i,j] + w0y[i,j]) + s_dy[m,n]*(wyy[i,j] + w0yy[i,j]) + nu*(s_dx[m,n]*(wxy[i,j] + w0xy[i,j]) + s_dxy[m,n]*(wx[i,j] + w0x[i,j])))/(1-nu**2))
+                                v_s_w += t[i,j]*(s_dxy[m,n]*(wx[i,j] + w0x[i,j]) + s_dx[m,n]*(wxy[i,j] + w0xy[i,j]) + s_dy[m,n]*(wxx[i,j] + w0xx[i,j]) + s_dxx[m,n]*(wy[i,j] + w0y[i,j]))/(2*(1+nu))
+                                
+                                v_s_u = t[i,j]*s_dxy[m,n]/(2*(1-nu))
+                                v_s_v = t[i,j]*(s_dyy[m,n]/(1-nu**2) + s_dxx[m,n]/(2*(1+nu)))
+                                
+                                #Thickness variation terms are ty sigmay + tx tauxy
+                                v_s_w += ty[i,j]*(nu*s_dx[m,n]*(wx[i,j]+w0x[i,j]) + (-s_0[m,n]/r + s_dy[m,n]*(wy[i,j]+w0y[i,j])))/(1-nu**2)
+                                v_s_w += tx[i,j]*(s_dx[m,n]*(wy[i,j]+w0y[i,j]) + s_dy[m,n]*(wx[i,j]+w0x[i,j]))/(2*(1+nu))
+                                
+                                v_s_u += ty[i,j]*nu*s_dx[m,n]/(1-nu**2) + tx[i,j]*s_dy[m,n]/(2*(1+nu))
+                                
+                                v_s_v += ty[i,j]*s_dy[m,n]/(1-nu**2) + tx[i,j]*s_dx[m,n]/(2*(1+nu))
+                                
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, u_s_w, ind_1D_u, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, u_s_u, ind_1D_u, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, u_s_v, ind_1D_u, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                                
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, v_s_w, ind_1D_v, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, v_s_u, ind_1D_v, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, v_s_v, ind_1D_v, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                    
+                elif i == Lpnts - 2:
+                    #wx(x=L) = 0
+                    for m in range(si.size):
+                        for n in range(sj.size):
+                            if s_dx[m,n] != 0:
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx[m,n], ind_1D_w, calc1DIndex(i_bcL + si[m],j + sj[n], 0, Lpnts, rpnts))
+                    
+                    #ux(x=L) - ((1-nu**2)*load - wx[1, :]**2/2 - wx[1, :]*w0x[1, :] + nu * w[1, :] / r) = 0
+                    #vx(x=L) = 0
+                    if bc_type == 'load':
+                        for m in range(si.size):
+                            for n in range(sj.size):
+                                if s_dx[m,n] != 0:
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx[m,n], ind_1D_v, calc1DIndex(i_bcL + si[m],j + sj[n], 2, Lpnts, rpnts))
+                                    
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx[m,n], ind_1D_u, calc1DIndex(i_bcL + si[m],j + sj[n], 1, Lpnts, rpnts))
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx[m,n]*(wx[i_bcL,j]+w0x[i_bcL,j]), ind_1D_u, calc1DIndex(i_bcL + si[m], j + sj[n], 0, Lpnts, rpnts))
+                                
+                                if s_0[m,n] != 0:
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, -nu*s_0[m,n]/r, ind_1D_u, calc1DIndex(i_bcL + si[m], j + sj[n], 0, Lpnts, rpnts))
+                    
+                    #ux = regular diffeq (no ux requirement if bc_type is disp)
+                    elif bc_type == 'disp':
+                        for m in range(si.size):
+                            i_ind = i_bcL + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                #u stability equation (only w has nonlinear contributions
+                                #(uyy + vxy)/(2*(1+nu)) + (nu*vxy + uxx)/(1-nu**2) -nu*wx/r(1-nu**2) + (w0x*wxx + wx*(wxx+w0xx) + nu*(w0y*wxy + wy*(wxy + w0xy)))/(1-nu**2)
+                                #+ (w0yy*wx + wyy*(wx + w0x) + w0xy*wy + wxy*(wy + w0y))/(2(1+nu))
+                                u_s_w = t[i,j]*(-nu*s_dx[m,n]/(r*(1-nu**2)) + (s_dxx[m,n]*(wx[i,j] + w0x[i,j]) + s_dx[m,n]*(wxx[i,j] + w0xx[i,j]) + nu*(s_dxy[m,n]*(wy[i,j] + w0y[i,j]) + s_dy[m,n]*(wxy[i,j] + w0xy[i,j])))/(1-nu**2))
+                                u_s_w += t[i,j]*(s_dx[m,n]*(wyy[i,j] + w0yy[i,j]) + s_dyy[m,n]*(wx[i,j] +w0x[i,j]) + s_dy[m,n]*(wxy[i,j] + w0xy[i,j]) + s_dxy[m,n]*(wy[i,j] + w0y[i,j]))/(2*(1+nu))
+                                
+                                u_s_u = t[i,j]*(s_dxx[m,n]/(1-nu**2) + s_dyy[m,n]/(2*(1+nu)))
+                                u_s_v = t[i,j]*(s_dxy[m,n]/(2*(1-nu)))
+                                
+                                #sigx = (ux + wx**2/2 + wx w0x + nu (vy - w/r + wy**2/2 + wy w0y )(1-nu**2)
+                                #sigy = (nu*(ux + wx**2/2 + wx w0x) + (vy - w/r + wy**2/2 + wy w0y )(1-nu**2)
+                                #tau = (vx + uy + wx wy + w0x wy + wx w0y)/(2*(1+nu))
+                                
+                                #Thickness variation terms are tx sigmax + ty tauxy
+                                u_s_w += tx[i,j]*(s_dx[m,n]*(wx[i,j]+w0x[i,j]) + nu*(-s_0[m,n]/r + s_dy[m,n]*(wy[i,j]+w0y[i,j])))/(1-nu**2)
+                                u_s_w += ty[i,j]*(s_dx[m,n]*(wy[i,j]+w0y[i,j]) + s_dy[m,n]*(wx[i,j]+w0x[i,j]))/(2*(1+nu))
+                                
+                                u_s_u += tx[i,j]*s_dx[m,n]/(1-nu**2) + ty[i,j]*s_dy[m,n]/(2*(1+nu))
+                                
+                                u_s_v += tx[i,j]*nu*s_dy[m,n]/(1-nu**2) + ty[i,j]*s_dx[m,n]/(2*(1+nu))
+                                
+                                #v stability equation (again, only w has nonlinear contributions)
+                                # (vxx + uxy)/(2*(1+nu)) + (vyy + nu*uxy)/(1-nu**2) - wy/r(1-nu**2) + (w0y*wyy + wy*(wyy + w0yy) + nu*(w0xy*wx + wxy*(wx + w0x))))/(1-nu**2)
+                                # + (w0x*wxy + wx*(wxy + w0xy) + w0xx*wy + wxx*(wy + w0y))/(2(1+nu))
+                                v_s_w = t[i,j]*(-s_dy[m,n]/(r*(1-nu**2)) + (s_dyy[m,n]*(wy[i,j] + w0y[i,j]) + s_dy[m,n]*(wyy[i,j] + w0yy[i,j]) + nu*(s_dx[m,n]*(wxy[i,j] + w0xy[i,j]) + s_dxy[m,n]*(wx[i,j] + w0x[i,j])))/(1-nu**2))
+                                v_s_w += t[i,j]*(s_dxy[m,n]*(wx[i,j] + w0x[i,j]) + s_dx[m,n]*(wxy[i,j] + w0xy[i,j]) + s_dy[m,n]*(wxx[i,j] + w0xx[i,j]) + s_dxx[m,n]*(wy[i,j] + w0y[i,j]))/(2*(1+nu))
+                                
+                                v_s_u = t[i,j]*s_dxy[m,n]/(2*(1-nu))
+                                v_s_v = t[i,j]*(s_dyy[m,n]/(1-nu**2) + s_dxx[m,n]/(2*(1+nu)))
+                                
+                                #Thickness variation terms are ty sigmay + tx tauxy
+                                v_s_w += ty[i,j]*(nu*s_dx[m,n]*(wx[i,j]+w0x[i,j]) + (-s_0[m,n]/r + s_dy[m,n]*(wy[i,j]+w0y[i,j])))/(1-nu**2)
+                                v_s_w += tx[i,j]*(s_dx[m,n]*(wy[i,j]+w0y[i,j]) + s_dy[m,n]*(wx[i,j]+w0x[i,j]))/(2*(1+nu))
+                                
+                                v_s_u += ty[i,j]*nu*s_dx[m,n]/(1-nu**2) + tx[i,j]*s_dy[m,n]/(2*(1+nu))
+                                
+                                v_s_v += ty[i,j]*s_dy[m,n]/(1-nu**2) + tx[i,j]*s_dx[m,n]/(2*(1+nu))
+                                
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, u_s_w, ind_1D_u, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, u_s_u, ind_1D_u, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, u_s_v, ind_1D_u, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                                
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, v_s_w, ind_1D_v, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, v_s_u, ind_1D_v, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, v_s_v, ind_1D_v, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                
+                elif i == Lpnts - 1:
+                    #w(x=L) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, calc1DIndex(i_bcL, j, 0, Lpnts, rpnts))
+                
+                    #v(x = L) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_v, calc1DIndex(i_bcL, j, 2, Lpnts, rpnts))
+                    
+                    if bc_type == 'load':
+                        if j < rpnts-1:
+                            #uy(x = L) = 0
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_u, calc1DIndex(i_bcL, j, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, -1, ind_1D_u, calc1DIndex(i_bcL, j+1, 1, Lpnts, rpnts))
+                        else:
+                            #For last u point just add u stability equation
+
+                            for m in range(si.size):
+                                i_ind = i_bcL + si[m]
+                                for n in range(sj.size):
+                                    j_ind = j + sj[n]
+                                    
+                                    #u stability equation (only w has nonlinear contributions
+                                    #(uyy + vxy)/(2*(1+nu)) + (nu*vxy + uxx)/(1-nu**2) -nu*wx/r(1-nu**2) + (w0x*wxx + wx*(wxx+w0xx) + nu*(w0y*wxy + wy*(wxy + w0xy)))/(1-nu**2)
+                                    #+ (w0yy*wx + wyy*(wx + w0x) + w0xy*wy + wxy*(wy + w0y))/(2(1+nu))
+                                    u_s_w = t[i,j]*(-nu*s_dx[m,n]/(r*(1-nu**2)) + (s_dxx[m,n]*(wx[i,j] + w0x[i,j]) + s_dx[m,n]*(wxx[i,j] + w0xx[i,j]) + nu*(s_dxy[m,n]*(wy[i,j] + w0y[i,j]) + s_dy[m,n]*(wxy[i,j] + w0xy[i,j])))/(1-nu**2))
+                                    u_s_w += t[i,j]*(s_dx[m,n]*(wyy[i,j] + w0yy[i,j]) + s_dyy[m,n]*(wx[i,j] +w0x[i,j]) + s_dy[m,n]*(wxy[i,j] + w0xy[i,j]) + s_dxy[m,n]*(wy[i,j] + w0y[i,j]))/(2*(1+nu))
+                                    
+                                    u_s_u = t[i,j]*(s_dxx[m,n]/(1-nu**2) + s_dyy[m,n]/(2*(1+nu)))
+                                    u_s_v = t[i,j]*(s_dxy[m,n]/(2*(1-nu)))
+                                    
+                                    #sigx = (ux + wx**2/2 + wx w0x + nu (vy - w/r + wy**2/2 + wy w0y )(1-nu**2)
+                                    #sigy = (nu*(ux + wx**2/2 + wx w0x) + (vy - w/r + wy**2/2 + wy w0y )(1-nu**2)
+                                    #tau = (vx + uy + wx wy + w0x wy + wx w0y)/(2*(1+nu))
+                                    
+                                    #Thickness variation terms are tx sigmax + ty tauxy
+                                    u_s_w += tx[i,j]*(s_dx[m,n]*(wx[i,j]+w0x[i,j]) + nu*(-s_0[m,n]/r + s_dy[m,n]*(wy[i,j]+w0y[i,j])))/(1-nu**2)
+                                    u_s_w += ty[i,j]*(s_dx[m,n]*(wy[i,j]+w0y[i,j]) + s_dy[m,n]*(wx[i,j]+w0x[i,j]))/(2*(1+nu))
+                                    
+                                    u_s_u += tx[i,j]*s_dx[m,n]/(1-nu**2) + ty[i,j]*s_dy[m,n]/(2*(1+nu))
+                                    
+                                    u_s_v += tx[i,j]*nu*s_dy[m,n]/(1-nu**2) + ty[i,j]*s_dx[m,n]/(2*(1+nu))
+                                    
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, u_s_w, ind_1D_u, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, u_s_u, ind_1D_u, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, u_s_v, ind_1D_u, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                                    
+                    elif bc_type == 'disp':
+                        #u(x = L) = const
+                        data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_u, calc1DIndex(i_bcL, j, 1, Lpnts, rpnts))
+                
+                else:
+                    for m in range(si.size):
+                        i_ind = i+si[m]
+                        for n in range(sj.size):
+                            j_ind = j+sj[n]
+                            
+                            #sigx = (ux + wx**2/2 + wx w0x + nu (vy - w/r + wy**2/2 + wy w0y )(1-nu**2)
+                            #sigy = (nu*(ux + wx**2/2 + wx w0x) + (vy - w/r + wy**2/2 + wy w0y )(1-nu**2)
+                            #tau = (vx + uy + wx wy + w0x wy + wx w0y)/(2*(1+nu))
+                            
+                            #w stability equation
+                            # D*(wxxxx + 2wxxyy + wyyyy) - sig_y/r - sigx (wxx + w0xx) - sigy (wyy +w0yy) - 2 tau (wxy + w0xy) = 0
+                            # First do D*(wxxxx + 2wxxyy + wyyyy) including t derivatives and spatial variations in t
+                            w_s_w = (t[i,j]**2 /(12-12*nu**2))*(s_dxxxx[m,n] + 2*s_dxxyy[m,n] + s_dyyyy[m,n]) + tx[i,j]*t[i,j]*(s_dxyy[m,n] + s_dxxx[m,n])/(2-2*nu**2) + ty[i,j]*t[i,j]*(s_dxxy[m,n] + s_dyyy[m,n])/(2-2*nu**2)
+                            
+                            w_s_w += t[i,j]*txy[i,j]*(s_dxy[m,n])/(2+2*nu) + (t[i,j]*txx[i,j]+2*tx[i,j]**2)*(nu*s_dyy[m,n] + s_dxx[m,n])/(4*(1-nu**2)) +  (t[i,j]*tyy[i,j]+2*ty[i,j]**2)*(s_dyy[m,n] + nu*s_dxx[m,n])/(4*(1-nu**2))
+                            
+                            #Next do - sig_y/r term
+                            w_s_w += s_0[m,n]/(r**2*(1-nu**2)) - (nu*s_dx[m,n]*(wx[i,j] + w0x[i,j]) + s_dy[m,n]*(wy[i,j] + w0y[i,j]))/(r*(1-nu**2))
+                            
+                            #Next sigx (wxx + w0xx) term
+                            w_s_w -= (wxx[i,j] + w0xx[i,j])*(s_dx[m,n]*(wx[i,j] + w0x[i,j]) + nu*(-s_0[m,n]/r + s_dy[m,n]*(wy[i,j] + w0y[i,j])))/(1-nu**2)
+                            w_s_w -= s_dxx[m,n]*(ux[i,j] + wx[i,j]**2/2 + wx[i,j]*w0x[i,j] + nu*(vy[i,j] - w[i,j]/r + wy[i,j]**2/2 + wy[i,j]*w0y[i,j]))/(1-nu**2)
+                            
+                            #Next sigy(wyy + w0yy) term
+                            w_s_w -= (wyy[i,j]+w0yy[i,j])*( nu*(s_dx[m,n]*(wx[i,j] + w0x[i,j])) -s_0[m,n]/r + s_dy[m,n]*(wy[i,j] + w0y[i,j]))/(1-nu**2)
+                            w_s_w -= s_dyy[m,n]*(nu*(ux[i,j] + wx[i,j]**2/2 + wx[i,j]*w0x[i,j]) + vy[i,j] - w[i,j]/r + wy[i,j]**2/2 + wy[i,j]*w0y[i,j])/(1-nu**2)
+                            
+                            #Next tau(wxy + w0xy) term
+                            w_s_w -= 2*(wxy[i,j]+w0xy[i,j])*(s_dx[m,n]*(wy[i,j]+w0y[i,j]) + s_dy[m,n]*(wx[i,j]+w0x[i,j]))/(2*(1+nu))
+                            w_s_w -= 2*s_dxy[m,n]*(vx[i,j] + uy[i,j] + wx[i,j]*wy[i,j] + w0x[i,j]*wy[i,j] + wx[i,j]*w0y[i,j])/(2*(1+nu))
+                            
+                            #Repeat process for partial u
+                            w_s_u = s_dx[m,n]*(-nu/r - (wxx[i,j] + w0xx[i,j]) - nu*(wyy[i,j] + w0yy[i,j]))/(1-nu**2) - 2*s_dy[m,n]*(wxy[i,j] + w0xy[i,j])/(2*(1+nu))
+
+                            #Again for v
+                            w_s_v = s_dy[m,n]*(-1/r - nu*(wxx[i,j] + w0xx[i,j]) - (wyy[i,j] + w0yy[i,j]))/(1-nu**2) - 2*s_dx[m,n]*(wxy[i,j] + w0xy[i,j])/(2*(1+nu))
+                            
+                            #u stability equation (only w has nonlinear contributions
+                            #(uyy + vxy)/(2*(1+nu)) + (nu*vxy + uxx)/(1-nu**2) -nu*wx/r(1-nu**2) + (w0x*wxx + wx*(wxx+w0xx) + nu*(w0y*wxy + wy*(wxy + w0xy)))/(1-nu**2)
+                            #+ (w0yy*wx + wyy*(wx + w0x) + w0xy*wy + wxy*(wy + w0y))/(2(1+nu))
+                            u_s_w = t[i,j]*(-nu*s_dx[m,n]/(r*(1-nu**2)) + (s_dxx[m,n]*(wx[i,j] + w0x[i,j]) + s_dx[m,n]*(wxx[i,j] + w0xx[i,j]) + nu*(s_dxy[m,n]*(wy[i,j] + w0y[i,j]) + s_dy[m,n]*(wxy[i,j] + w0xy[i,j])))/(1-nu**2))
+                            u_s_w += t[i,j]*(s_dx[m,n]*(wyy[i,j] + w0yy[i,j]) + s_dyy[m,n]*(wx[i,j] +w0x[i,j]) + s_dy[m,n]*(wxy[i,j] + w0xy[i,j]) + s_dxy[m,n]*(wy[i,j] + w0y[i,j]))/(2*(1+nu))
+                            
+                            u_s_u = t[i,j]*(s_dxx[m,n]/(1-nu**2) + s_dyy[m,n]/(2*(1+nu)))
+                            u_s_v = t[i,j]*(s_dxy[m,n]/(2*(1-nu)))
+                            
+                            #sigx = (ux + wx**2/2 + wx w0x + nu (vy - w/r + wy**2/2 + wy w0y )(1-nu**2)
+                            #sigy = (nu*(ux + wx**2/2 + wx w0x) + (vy - w/r + wy**2/2 + wy w0y )(1-nu**2)
+                            #tau = (vx + uy + wx wy + w0x wy + wx w0y)/(2*(1+nu))
+                            
+                            #Thickness variation terms are tx sigmax + ty tauxy
+                            u_s_w += tx[i,j]*(s_dx[m,n]*(wx[i,j]+w0x[i,j]) + nu*(-s_0[m,n]/r + s_dy[m,n]*(wy[i,j]+w0y[i,j])))/(1-nu**2)
+                            u_s_w += ty[i,j]*(s_dx[m,n]*(wy[i,j]+w0y[i,j]) + s_dy[m,n]*(wx[i,j]+w0x[i,j]))/(2*(1+nu))
+                            
+                            u_s_u += tx[i,j]*s_dx[m,n]/(1-nu**2) + ty[i,j]*s_dy[m,n]/(2*(1+nu))
+                            
+                            u_s_v += tx[i,j]*nu*s_dy[m,n]/(1-nu**2) + ty[i,j]*s_dx[m,n]/(2*(1+nu))
+                            
+                            #v stability equation (again, only w has nonlinear contributions)
+                            # (vxx + uxy)/(2*(1+nu)) + (vyy + nu*uxy)/(1-nu**2) - wy/r(1-nu**2) + (w0y*wyy + wy*(wyy + w0yy) + nu*(w0xy*wx + wxy*(wx + w0x))))/(1-nu**2)
+                            # + (w0x*wxy + wx*(wxy + w0xy) + w0xx*wy + wxx*(wy + w0y))/(2(1+nu))
+                            v_s_w = t[i,j]*(-s_dy[m,n]/(r*(1-nu**2)) + (s_dyy[m,n]*(wy[i,j] + w0y[i,j]) + s_dy[m,n]*(wyy[i,j] + w0yy[i,j]) + nu*(s_dx[m,n]*(wxy[i,j] + w0xy[i,j]) + s_dxy[m,n]*(wx[i,j] + w0x[i,j])))/(1-nu**2))
+                            v_s_w += t[i,j]*(s_dxy[m,n]*(wx[i,j] + w0x[i,j]) + s_dx[m,n]*(wxy[i,j] + w0xy[i,j]) + s_dy[m,n]*(wxx[i,j] + w0xx[i,j]) + s_dxx[m,n]*(wy[i,j] + w0y[i,j]))/(2*(1+nu))
+                            
+                            v_s_u = t[i,j]*s_dxy[m,n]/(2*(1-nu))
+                            v_s_v = t[i,j]*(s_dyy[m,n]/(1-nu**2) + s_dxx[m,n]/(2*(1+nu)))
+                            
+                            #Thickness variation terms are ty sigmay + tx tauxy
+                            v_s_w += ty[i,j]*(nu*s_dx[m,n]*(wx[i,j]+w0x[i,j]) + (-s_0[m,n]/r + s_dy[m,n]*(wy[i,j]+w0y[i,j])))/(1-nu**2)
+                            v_s_w += tx[i,j]*(s_dx[m,n]*(wy[i,j]+w0y[i,j]) + s_dy[m,n]*(wx[i,j]+w0x[i,j]))/(2*(1+nu))
+                            
+                            v_s_u += ty[i,j]*nu*s_dx[m,n]/(1-nu**2) + tx[i,j]*s_dy[m,n]/(2*(1+nu))
+                            
+                            v_s_v += ty[i,j]*s_dy[m,n]/(1-nu**2) + tx[i,j]*s_dx[m,n]/(2*(1+nu))
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, w_s_w, ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, w_s_u, ind_1D_w, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, w_s_v, ind_1D_w, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                        
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, u_s_w, ind_1D_u, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, u_s_u, ind_1D_u, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, u_s_v, ind_1D_u, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, v_s_w, ind_1D_v, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, v_s_u, ind_1D_v, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, v_s_v, ind_1D_v, calc1DIndex(i_ind, j_ind, 2, Lpnts, rpnts))
+        
+        t1 = time.time()
+        print("Took " + str(t1-t0) + " seconds to get the sparse jacobian matrix rows and cols.")
+        
+        #zero_inds = np.where(np.array(matrixData) == 0)
+        
+        #print(zero_inds[0])
+        #print(data_ind)
+        
+        #matrixData = np.delete(matrixData, zero_inds)
+        #matrixRow = np.delete(matrixRow, zero_inds)
+        #matrixCol = np.delete(matrixCol, zero_inds)
+        
+        matrixData = matrixData[0:data_ind]
+        matrixRow = matrixRow[0:data_ind]
+        matrixCol = matrixCol[0:data_ind]
+        
+        matrix = (matrixData, (matrixRow, matrixCol))
+        #print(3*Lpnts*rpnts)
+        #print(max(matrixCol))
+        #print(max(matrixRow))
+        #print(min(matrixCol))
+        #print(min(matrixRow))
+        
+        t2 = time.time()
+        print("Took " + str(t2-t1) + " seconds to delete shit.")
+        
+        jacobian = csc_matrix(matrix, shape = (3*Lpnts*rpnts, 3*Lpnts*rpnts))
+        jacobian.sort_indices()
+        
+        t3 = time.time()
+        print("Took " + str(t3-t2) + " seconds to create the sparse jacobian matrix.")
+        
+        return jacobian
+        
+    def calcJacobSF(self, double[:,:] w, double[:,:] F, double load, bc_type = 'load', int[:] zero_pnt = np.array([2,0]), double scale = 1):
+        
+        t0 = time.time()
+        
+        #If I really want to make this faster, then could parallel process it easily, since each i/j coordinate is independent
+        cdef double r = self.r
+        cdef double L = self.L
+        cdef double nu = self.nu
+        
+        cdef double D = np.mean(self.t_derivs[0])**2/(12-12*nu**2)
+        
+        cdef double[:] consts = np.array([D, nu, r, L])
+        
+        cdef int Lpnts = w.shape[0]
+        cdef int rpnts = w.shape[1]
+        
+        dgen = self.dgen
+        
+        cdef int order_x = dgen.order_x
+        cdef int order_y = dgen.order_y
+        
+        #Initialize w deriv arrays
+        cdef double[:,:] wy = dgen.deriv(np.array(w), 0, 1)
+        
+        cdef double[:,:] wxx = dgen.deriv(np.array(w), 2, 0)
+        cdef double[:,:] wxy = dgen.deriv(np.array(w), 1, 1)
+        cdef double[:,:] wyy = dgen.deriv(np.array(w), 0, 2)
+
+        cdef double[:,:,:] w_derivs = np.zeros((3, Lpnts, rpnts))
+        w_derivs[0,:,:] = wxx
+        w_derivs[1,:,:] = wxy
+        w_derivs[2,:,:] = wyy
+        
+        #Initialize w0 deriv array
+        cdef double[:,:,:] w0_derivs = self.w0_derivs[3:,:,:]
+        
+        #Stresses are inputs to the formulas at places, so calculate those first
+        cdef double[:,:,:] stresses = np.zeros((3, Lpnts, rpnts))
+        cdef double[:,:] sigx = dgen.deriv(np.array(F), 0, 2) + load
+        cdef double[:,:] sigy = dgen.deriv(np.array(F), 2, 0)
+        cdef double[:,:] tau = -dgen.deriv(np.array(F), 1, 1)
+        stresses[0,:,:] = sigx 
+        stresses[1,:,:] = sigy 
+        stresses[2,:,:] = tau
+        
+        #Initialize stencils
+        cdef double[:,:] s_dx
+        cdef double[:,:] s_dxx
+        cdef double[:,:] s_dxy
+        cdef double[:,:] s_dyy
+        cdef double[:,:] s_dxxxx
+        cdef double[:,:] s_dxxyy
+        cdef double[:,:] s_dyyyy
+        
+        cdef double[:,:,:] stencils
+        
+        #Calculate the stencils for all the required derivatives in the bulk 
+        #Edge cases are calculated in the loop
+        
+        cdef double[:,:] sb_dx = dgen.gen_stencil(1,0)
+        
+        cdef double[:,:] sb_dxx = dgen.gen_stencil(2,0)
+        cdef double[:,:] sb_dxy = dgen.gen_stencil(1,1)
+        cdef double[:,:] sb_dyy = dgen.gen_stencil(0,2)
+        
+        cdef double[:,:] sb_dxxxx = dgen.gen_stencil(4,0)
+        cdef double[:,:] sb_dxxyy = dgen.gen_stencil(2,2)
+        cdef double[:,:] sb_dyyyy = dgen.gen_stencil(0,4)
+        
+        cdef double[:,:,:] bulk_stencils = np.zeros((6, 3+2*order_x, 3+2*order_y))
+        
+        bulk_stencils[0,:,:] = sb_dxx
+        bulk_stencils[1,:,:] = sb_dxy
+        bulk_stencils[2,:,:] = sb_dyy
+        
+        bulk_stencils[3,:,:] = sb_dxxxx
+        bulk_stencils[4,:,:] = sb_dxxyy
+        bulk_stencils[5,:,:] = sb_dyyyy
+        
+        cdef double[:,:,:] edge_stencils = np.zeros((6, 4+2*order_x, 3+2*order_y))
+        
+        cdef int[:] si
+        
+        cdef int[:] sbi = np.arange(3+2*order_x) - order_x - 1
+        cdef int[:] sj = np.arange(3+2*order_y) - order_y - 1
+        
+        cdef int max_points = (4+2*order_x)*(4+2*order_y)*w.size*2*2
+        
+        cdef double[:] matrixData = np.zeros(max_points, dtype = 'float')
+        cdef int[:] matrixRow = np.arange(max_points, dtype = 'int')
+        cdef int[:] matrixCol = np.zeros(max_points, dtype = 'int')
+        
+        cdef int i_bc0 = 1
+        cdef int i_bcL = Lpnts - 2
+        
+        #A couple derivatives only exist for the boundary (at i = 1 and i = -2)
+        cdef double[:,:] s_0_BC0 = dgen.gen_stencil(0,0, i_bc0)
+        cdef double[:,:] s_0_BCL = dgen.gen_stencil(0,0, i_bcL)
+        
+        cdef double[:,:] s_dx_BC0 = dgen.gen_stencil(1,0, i_bc0)
+        cdef double[:,:] s_dx_BCL = dgen.gen_stencil(1,0, i_bcL)
+        
+        cdef double[:,:] s_dy_BC0 = dgen.gen_stencil(0,1, i_bc0)
+        cdef double[:,:] s_dy_BCL = dgen.gen_stencil(0,1, i_bcL)
+        
+        cdef double[:,:] s_dxx_BC0 = dgen.gen_stencil(2,0, i_bc0)
+        cdef double[:,:] s_dxx_BCL = dgen.gen_stencil(2,0, i_bcL)
+        
+        cdef double[:,:] s_dxy_BC0 = dgen.gen_stencil(1,1, i_bc0)
+        cdef double[:,:] s_dxy_BCL = dgen.gen_stencil(1,1, i_bcL)
+        
+        cdef double[:,:] s_dyy_BC0 = dgen.gen_stencil(0,2, i_bc0)
+        cdef double[:,:] s_dyy_BCL = dgen.gen_stencil(0,2, i_bcL)
+        
+        cdef double[:,:] s_dxxx_BC0 = dgen.gen_stencil(3,0, i_bc0)
+        cdef double[:,:] s_dxxx_BCL = dgen.gen_stencil(3,0, i_bcL)
+        
+        cdef double[:,:] s_dxyy_BC0 = dgen.gen_stencil(1,2, i_bc0)
+        cdef double[:,:] s_dxyy_BCL = dgen.gen_stencil(1,2, i_bcL)
+        
+        cdef int data_ind = 0
+        
+        cdef int ind_1D_w, ind_1D_F
+        cdef int i, j, m, n
+        
+        cdef double[:] partials = np.zeros(4)
+        
+        for i in range(Lpnts):
+            #First get stencils for the current axial position (it varies when close to the edge)
+            #If in bulk use bulk stencils
+            if i > order_x and i < Lpnts - 1 - order_x:
+                si = sbi
+                s_dx = sb_dx
+                stencils = bulk_stencils
+            #Otherwise generate edge stencils 
+            else:
+                #Boundary conditions for i = 0 and i = Lpnts-1 are calculated for the second point from the end
+                if i == 0:
+                    i_calc = i_bc0
+                elif i == Lpnts-1:
+                    i_calc = i_bcL
+                else:
+                    i_calc = i
+                
+                #Calculate the stencils for all the required derivatives
+                s_dx = dgen.gen_stencil(1,0,i_calc)
+                
+                s_dxx = dgen.gen_stencil(2,0,i_calc)
+                s_dxy = dgen.gen_stencil(1,1,i_calc)
+                s_dyy = dgen.gen_stencil(0,2,i_calc)
+                
+                s_dxxxx = dgen.gen_stencil(4,0,i_calc)
+                s_dxxyy = dgen.gen_stencil(2,2,i_calc)
+                s_dyyyy = dgen.gen_stencil(0,4,i_calc)
+                
+                edge_stencils[0,:,:] = s_dxx
+                edge_stencils[1,:,:] = s_dxy
+                edge_stencils[2,:,:] = s_dyy
+                
+                edge_stencils[3,:,:] = s_dxxxx
+                edge_stencils[4,:,:] = s_dxxyy
+                edge_stencils[5,:,:] = s_dyyyy
+                
+                stencils = edge_stencils
+                
+                if i_calc <= order_x:
+                    si = np.arange(4+2*order_x) - i_calc
+                else:
+                    si = -np.arange(4+2*order_x)[::-1] + (Lpnts - 1 - i_calc)
+            
+            for j in range(rpnts):
+                #i corresponds to x, where x(i = 0) = -order_x * hx, x(i = order_x) = 0, x(i = Lpnts -1 + order_x) = L, x(i = Lpnts -1 + 2*order_x) = L + order_x*hx
+                #j corresponds to y, where y(j = 0) = 0 and y(j = rpnts - 1) = 2pi r - hy. 
+                
+                ind_1D_w = calc1DIndex(i,j, 0, Lpnts, rpnts)
+                ind_1D_F = calc1DIndex(i,j, 1, Lpnts, rpnts)
+                
+                #first take care of boundary conditions
+                if i == 0:
+                    if bc_type == 'load':
+                        #First BC is w(x= 0) = const and Fx = 0
+                        
+                        #w(x=0) = 0 or nu*r*load
+                        data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, calc1DIndex(i_bc0, j, 0, Lpnts, rpnts))
+                        
+                        #Fx(x=0) = 0
+                        for m in range(si.size):
+                            i_ind = i_bc0 + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                if s_dx_BC0[m,n] != 0:
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx_BC0[m,n], ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                    
+                    elif bc_type == 'load_vy':
+                        #Usual w BC
+                        data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, calc1DIndex(i_bc0, j, 0, Lpnts, rpnts))
+                        #Fxx - nu*Fyy + w/r - wy^2/2 = 0 (sets vy = 0)
+                        for m in range(si.size):
+                            i_ind = i_bc0 + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                val_F = s_dxx_BC0[m,n] - nu*s_dyy_BC0[m,n]
+                                #val_w = s_0_BC0[m,n]/r - wy[i_bc0,j]*s_dy_BC0[m,n]
+                                
+                                #data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_w, ind_1D_F, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_F, ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                    
+                elif i == 1:
+                    if bc_type == 'load':
+                        #wx(x=0) = 0
+                        #Fxxx + Fxyy = 0
+                        for m in range(si.size):
+                            i_ind = i_bc0 + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                if s_dx_BC0[m,n] != 0:
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx_BC0[m,n], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                    
+                                val = s_dxxx_BC0[m,n] + s_dxyy_BC0[m,n]
+                                if val != 0:
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val, ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                    elif bc_type == 'load_vy':
+                        #wx(x=0) = 0
+                        #Fxxx + (1-nu)Fxyy + wx/r + wy wxy = 0
+                        
+                        for m in range(si.size):
+                            i_ind = i_bc0 + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                if s_dx_BC0[m,n] != 0:
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx_BC0[m,n], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                
+                                val_F = s_dxxx_BC0[m,n] + (1-nu)*s_dxyy_BC0[m,n]
+                                #val_w = s_dx_BC0[m,n]/r + wy[i,j]*s_dxy_BC0[m,n] + wxy[i,j]*s_dy_BC0[m,n]
+                                
+                                #data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_w, ind_1D_F, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_F, ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                
+                elif i == zero_pnt[0] and j == zero_pnt[1]:
+                    #F(x=i*dx, y = j*dy) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, scale, ind_1D_F, calc1DIndex(i, j, 1, Lpnts, rpnts))
+                    
+                    for m in range(si.size):
+                        i_ind = i + si[m]
+                        for n in range(sj.size):
+                            j_ind = j+sj[n]
+                            
+                            #Calculate the partials for the current values of i,j,m,n 
+                            partials = calcPartialsSF(partials, w_derivs[:,i,j], w0_derivs[:,i,j], stresses[:,i,j], stencils[:,m,n], consts)
+                            
+                            #Add the partials to the Jacobian
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[0], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[1], ind_1D_w, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                
+                elif bc_type == 'load_vy' and i == zero_pnt[2] and j == zero_pnt[3]:
+                    #F(x=i*dx, y = j*dy) = 0
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, scale, ind_1D_F, calc1DIndex(i, j, 1, Lpnts, rpnts))
+                    
+                    #Fx(x=i*dx, y = j*dy) = 0
+                    for m in range(si.size):
+                        i_ind = i + si[m]
+                        for n in range(sj.size):
+                            j_ind = j+sj[n]
+                            #if s_dx[m,n] != 0:
+                            #    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx[m,n], ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            
+                            #Calculate the partials for the current values of i,j,m,n 
+                            partials = calcPartialsSF(partials, w_derivs[:,i,j], w0_derivs[:,i,j], stresses[:,i,j], stencils[:,m,n], consts)
+                            
+                            #Add the partials to the Jacobian
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[0], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[1], ind_1D_w, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            
+                elif i == Lpnts - 2:
+                    if bc_type == 'load':
+                        #wx(x=L) = 0
+                        #Fxxx + Fxyy = 0
+                        for m in range(si.size):
+                            i_ind = i_bcL + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                if s_dx_BCL[m,n] != 0:
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx_BCL[m,n], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                    
+                                val = s_dxxx_BCL[m,n] + s_dxyy_BCL[m,n]
+                                if val != 0:
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val, ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                    elif bc_type == 'load_vy':
+                        #wx(x=0) = 0
+                        #Fxxx + (1-nu)Fxyy + wx/r + wy wxy = 0
+                        
+                        for m in range(si.size):
+                            i_ind = i_bcL + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                if s_dx_BCL[m,n] != 0:
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx_BCL[m,n], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                
+                                val_F = s_dxxx_BCL[m,n] + (1-nu)*s_dxyy_BCL[m,n]
+                                #val_w = s_dx_BCL[m,n]/r + wy[i,j]*s_dxy_BCL[m,n] + wxy[i,j]*s_dy_BCL[m,n]
+                                
+                                #data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_w, ind_1D_F, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_F, ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                
+                elif i == Lpnts - 1:
+                    if bc_type == 'load':
+                        #w(x=0) = 0 or nu*r*load
+                        data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, calc1DIndex(i_bcL, j, 0, Lpnts, rpnts))
+                    
+                        #Fx(x=0) = 0
+                        for m in range(si.size):
+                            i_ind = i_bcL + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                if s_dx_BCL[m,n] != 0:
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx_BCL[m,n], ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                    elif bc_type == 'load_vy':
+                        #Usual w BC
+                        data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, calc1DIndex(i_bcL, j, 0, Lpnts, rpnts))
+                    
+                        #Fxx - nu*Fyy + w/r - wy^2/2 = 0 (sets vy = 0)
+                        for m in range(si.size):
+                            i_ind = i_bcL + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                val_F = s_dxx_BCL[m,n] - nu*s_dyy_BCL[m,n]
+                                #val_w = s_0_BCL[m,n]/r - wy[i_bc0,j]*s_dy_BCL[m,n]
+                                
+                                #data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_w, ind_1D_F, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_F, ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                
+                else:
+                    
+                    for m in range(si.size):
+                        i_ind = i+si[m]
+                        for n in range(sj.size):
+                            j_ind = j+sj[n]
+                            
+                            #Calculate the partials for the current values of i,j,m,n 
+                            partials = calcPartialsSF(partials, w_derivs[:,i,j], w0_derivs[:,i,j], stresses[:,i,j], stencils[:,m,n], consts)
+                            
+                            #Add the partials to the Jacobian
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[0], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[1], ind_1D_w, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[2], ind_1D_F, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[3], ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+        
+        t1 = time.time()
+        print("Took " + str(t1-t0) + " seconds to get the sparse jacobian matrix rows and cols.")
+        
+        matrixData = matrixData[0:data_ind]
+        matrixRow = matrixRow[0:data_ind]
+        matrixCol = matrixCol[0:data_ind]
+        
+        matrix = (matrixData, (matrixRow, matrixCol))
+        #print(2*Lpnts*rpnts)
+        #print(max(matrixCol))
+        #print(max(matrixRow))
+        #print(min(matrixCol))
+        #print(min(matrixRow))
+        
+        t2 = time.time()
+        print("Took " + str(t2-t1) + " seconds to delete shit.")
+        
+        jacobian = csc_matrix(matrix, shape = (2*Lpnts*rpnts, 2*Lpnts*rpnts))
+        jacobian.sort_indices() #Sort indices for pypardiso compatibility
+        
+        t3 = time.time()
+        print("Took " + str(t3-t1) + " seconds to create the sparse jacobian matrix.")
+        
+        return jacobian
+    
+    
+class fastJacobianSF:
+    def __init__(self, r, L, t, nu, dgen, w0_derivs):
+        self.r, self.L, self.t, self.nu = r, L, t, nu
+        self.dgen = dgen
+        self.w0_derivs = w0_derivs
+        
+    def calcJacobSF(self, double[:,:] w, double[:,:] F, double load, bc_type = 'load', int[:] zero_pnt = np.array([2,0])):
+        #Assumes the existence of two ghost points
+        
+        t0 = time.time()
+        
+        #If I really want to make this faster, then could parallel process it easily, since each i/j coordinate is independent
+        cdef double r = self.r
+        cdef double L = self.L
+        cdef double nu = self.nu
+        
+        cdef double D = self.t**2/(12-12*nu**2)
+        
+        cdef double[:] consts = np.array([D, nu, r, L])
+        
+        cdef int Lpnts = w.shape[0]
+        cdef int rpnts = w.shape[1]
+        
+        dgen = self.dgen
+        
+        cdef int order_x = dgen.order_x
+        cdef int order_y = dgen.order_y
+        
+        #Initialize w deriv arrays
+        cdef double[:,:] wx = dgen.deriv(np.array(w), 1, 0)
+        cdef double[:,:] wy = dgen.deriv(np.array(w), 0, 1)
+        
+        cdef double[:,:] wxx = dgen.deriv(np.array(w), 2, 0)
+        cdef double[:,:] wxy = dgen.deriv(np.array(w), 1, 1)
+        cdef double[:,:] wyy = dgen.deriv(np.array(w), 0, 2)
+
+        cdef double[:,:,:] w_derivs = np.zeros((3, Lpnts, rpnts))
+        w_derivs[0,:,:] = wxx
+        w_derivs[1,:,:] = wxy
+        w_derivs[2,:,:] = wyy
+        
+        #Initialize w0 deriv array
+        cdef double[:,:] w0 = self.w0_derivs[0]
+        cdef double[:,:] w0x = self.w0_derivs[1]
+        cdef double[:,:] w0y = self.w0_derivs[2]
+        cdef double[:,:] w0xx = self.w0_derivs[3]
+        cdef double[:,:] w0xy = self.w0_derivs[4]
+        cdef double[:,:] w0yy = self.w0_derivs[5]
+        
+        cdef double[:,:,:] w0_derivs = self.w0_derivs[3:,:,:]
+        
+        #Stresses are inputs to the formulas at places, so calculate those first
+        cdef double[:,:,:] stresses = np.zeros((3, Lpnts, rpnts))
+        cdef double[:,:] sigx = dgen.deriv(np.array(F), 0, 2) + load
+        cdef double[:,:] sigy = dgen.deriv(np.array(F), 2, 0)
+        cdef double[:,:] tau = -dgen.deriv(np.array(F), 1, 1)
+        stresses[0,:,:] = sigx 
+        stresses[1,:,:] = sigy 
+        stresses[2,:,:] = tau
+        
+        #Initialize stencils
+        cdef double[:,:] s_dxx
+        cdef double[:,:] s_dxy
+        cdef double[:,:] s_dyy
+        cdef double[:,:] s_dxxxx
+        cdef double[:,:] s_dxxyy
+        cdef double[:,:] s_dyyyy
+        
+        cdef double[:,:,:] stencils
+        
+        #Calculate the stencils for all the required derivatives in the bulk 
+        #Edge cases are calculated in the loop
+        
+        cdef double[:,:] sb_dxx = dgen.gen_stencil(2,0)
+        cdef double[:,:] sb_dxy = dgen.gen_stencil(1,1)
+        cdef double[:,:] sb_dyy = dgen.gen_stencil(0,2)
+        
+        cdef double[:,:] sb_dxxxx = dgen.gen_stencil(4,0)
+        cdef double[:,:] sb_dxxyy = dgen.gen_stencil(2,2)
+        cdef double[:,:] sb_dyyyy = dgen.gen_stencil(0,4)
+        
+        cdef double[:,:,:] bulk_stencils = np.zeros((6, 3+2*order_x, 3+2*order_y))
+        
+        bulk_stencils[0,:,:] = sb_dxx
+        bulk_stencils[1,:,:] = sb_dxy
+        bulk_stencils[2,:,:] = sb_dyy
+        
+        bulk_stencils[3,:,:] = sb_dxxxx
+        bulk_stencils[4,:,:] = sb_dxxyy
+        bulk_stencils[5,:,:] = sb_dyyyy
+        
+        #Initialize edge_stencils array in memory
+        cdef double[:,:,:] edge_stencils = np.zeros((6, 4+2*order_x, 3+2*order_y))
+        
+        #Initialize points to be used
+        cdef int[:] si
+        
+        cdef int[:] sbi = np.arange(3+2*order_x) - order_x - 1
+        cdef int[:] sj = np.arange(3+2*order_y) - order_y - 1
+        
+        #Coordinate of x = 0 and x = L given that 2 ghost points are implemented
+        cdef int i_bc0 = 2
+        cdef int i_bcL = Lpnts - 3
+        
+        #A couple derivatives only exist for the boundary (at i = 2 and i = -3)
+        cdef int[:] si_BC0
+        cdef int[:] si_BCL
+        if order_x > 1:
+            si_BC0 = np.arange(4+2*order_x) - i_bc0
+            si_BCL = -np.arange(4+2*order_x)[::-1] + (Lpnts - 1 - i_bcL)
+        else:
+            si_BC0 = sbi
+            si_BCL = sbi
+        
+        cdef double[:,:] s_0_BC0 = dgen.gen_stencil(0,0, i_bc0)
+        cdef double[:,:] s_dx_BC0 = dgen.gen_stencil(1,0, i_bc0)
+        cdef double[:,:] s_dy_BC0 = dgen.gen_stencil(0,1, i_bc0)
+        cdef double[:,:] s_dxx_BC0 = dgen.gen_stencil(2,0, i_bc0)
+        cdef double[:,:] s_dxy_BC0 = dgen.gen_stencil(1,1, i_bc0)
+        cdef double[:,:] s_dyy_BC0 = dgen.gen_stencil(0,2, i_bc0)
+        cdef double[:,:] s_dxxx_BC0 = dgen.gen_stencil(3,0, i_bc0)
+        cdef double[:,:] s_dxyy_BC0 = dgen.gen_stencil(1,2, i_bc0)
+        
+        cdef double[:,:] s_0_BCL = dgen.gen_stencil(0,0, i_bcL)
+        cdef double[:,:] s_dx_BCL = dgen.gen_stencil(1,0, i_bcL)
+        cdef double[:,:] s_dy_BCL = dgen.gen_stencil(0,1, i_bcL)
+        cdef double[:,:] s_dxx_BCL = dgen.gen_stencil(2,0, i_bcL)
+        cdef double[:,:] s_dxy_BCL = dgen.gen_stencil(1,1, i_bcL)
+        cdef double[:,:] s_dyy_BCL = dgen.gen_stencil(0,2, i_bcL)
+        cdef double[:,:] s_dxxx_BCL = dgen.gen_stencil(3,0, i_bcL)
+        cdef double[:,:] s_dxyy_BCL = dgen.gen_stencil(1,2, i_bcL)
+        
+        cdef int max_points = (4+2*order_x)*(4+2*order_y)*w.size*2*2
+        
+        cdef double[:] matrixData = np.zeros(max_points, dtype = 'float')
+        cdef int[:] matrixRow = np.arange(max_points, dtype = 'int')
+        cdef int[:] matrixCol = np.zeros(max_points, dtype = 'int')
+        
+        cdef int data_ind = 0
+        
+        cdef int ind_1D_w, ind_1D_F
+        cdef int i, j, m, n
+        
+        cdef double[:] partials = np.zeros(4)
+        
+        cdef int ind_1D_lambda = 2*Lpnts*rpnts
+        
+        for i in range(Lpnts):
+            #First get stencils for the current axial position (it varies when close to the edge)
+            #If in bulk use bulk stencils
+            if i > order_x and i < Lpnts - 1 - order_x:
+                si = sbi
+                stencils = bulk_stencils
+            #Otherwise generate edge stencils 
+            else:
+                #Boundary conditions for i = 0 and i = Lpnts-1 are calculated for the second point from the end
+                if i <= 1:
+                    si = si_BC0
+                elif i >= Lpnts-2:
+                    si = si_BCL
+                else:
+                    s_dxx = dgen.gen_stencil(2,0,i)
+                    s_dxy = dgen.gen_stencil(1,1,i)
+                    s_dyy = dgen.gen_stencil(0,2,i)
+                    
+                    s_dxxxx = dgen.gen_stencil(4,0,i)
+                    s_dxxyy = dgen.gen_stencil(2,2,i)
+                    s_dyyyy = dgen.gen_stencil(0,4,i)
+                    
+                    edge_stencils[0,:,:] = s_dxx
+                    edge_stencils[1,:,:] = s_dxy
+                    edge_stencils[2,:,:] = s_dyy
+                    
+                    edge_stencils[3,:,:] = s_dxxxx
+                    edge_stencils[4,:,:] = s_dxxyy
+                    edge_stencils[5,:,:] = s_dyyyy
+                    
+                    stencils = edge_stencils
+                    
+                    if i <= order_x:
+                        si = np.arange(4+2*order_x) - i
+                    else:
+                        si = -np.arange(4+2*order_x)[::-1] + (Lpnts - 1 - i)
+            
+            for j in range(rpnts):
+                #i corresponds to x, where x(i = 0) = -order_x * hx, x(i = order_x) = 0, x(i = Lpnts -1 + order_x) = L, x(i = Lpnts -1 + 2*order_x) = L + order_x*hx
+                #j corresponds to y, where y(j = 0) = 0 and y(j = rpnts - 1) = 2pi r - hy. 
+                
+                ind_1D_w = calc1DIndex(i,j, 0, Lpnts, rpnts)
+                ind_1D_F = calc1DIndex(i,j, 1, Lpnts, rpnts)
+                
+                #first take care of boundary conditions
+                if i == 0:
+                    #w(x=0) = 0 or nu*r*load
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, calc1DIndex(i_bc0, j, 0, Lpnts, rpnts))
+                    
+                    if bc_type == 'load':
+                        #Fx(x=0) = 0
+                        for m in range(si.size):
+                            i_ind = i_bc0 + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx_BC0[m,n], ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                        
+                    elif bc_type == 'load_vy':
+                        #Set vy = 0
+                        #ep2 = sigy - nu*sigx = vy - w/r + wy^2/2 + wy w0y
+                        #Fxx - nu(Fyy + load) = vy - w/r + wy^2/2 + wy w0y
+                        #vy = Fxx - nu(Fyy + load) + w/r - wy^2/2 - wy w0y = 0
+                        #vy = 0 is fully determined by rpnts -1 applications
+                        #The last application ensures sum Fxx /rpnts = nu*load, which is physically valid. 
+                        #Also, needs to be done on both ends? 
+                        for m in range(si.size):
+                            i_ind = i_bc0 + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                val_F = s_dxx_BC0[m,n] - nu*s_dyy_BC0[m,n]
+                                val_w = s_0_BC0[m,n]/r - (wy[i_bc0,j]+w0y[i_bc0, j])*s_dy_BC0[m,n]
+                                #if j == 0 and i_ind == i_bc0 and j_ind == 0:
+                                #    val_F += 1
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_w, ind_1D_F, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_F, ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                    
+                elif i == 1:
+                    if bc_type == 'load':
+                        #wx(x=0) = 0
+                        #Fxxx + Fxyy = 0
+                        for m in range(si.size):
+                            i_ind = i_bc0 + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx_BC0[m,n], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                
+                                val = s_dxxx_BC0[m,n] + s_dxyy_BC0[m,n]
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val, ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                    
+                    elif bc_type == 'load_vy':
+                        #wx(x=0) = 0
+                        #Set uy to zero by setting uyy to zero 
+                        #-Fxy = uy + vx + wx wy + w0x wy + wx w0y
+                        #-Fxyy = uyy + vxy + wxy wy + wx wyy + w0xy wy + w0x wyy + wxy w0y + wx w0yy
+                        #uyy = -Fxyy - (vxy + wxy wy + wx wyy + w0xy wy + w0x wyy + wxy w0y + wx w0yy)
+                        
+                        #vy = Fxx - nu(Fyy + load) + w/r - wy^2/2 - wy w0y
+                        #vxy = Fxxx - nu(Fxyy) + wx/r - wy wxy - wxy w0y - wy w0xy
+                        
+                        #Finally
+                        #uyy = -Fxyy - (Fxxx - nu(Fxyy) + wx/r - wy wxy - wxy w0y - wy w0xy + wxy wy + wx wyy + w0xy wy + w0x wyy + wxy w0y + wx w0yy)
+                        #uyy = -Fxyy - (Fxxx - nu(Fxyy) + wx/r  + wx wyy + w0x wyy + wx w0yy)
+                        #uyy = -Fxxx - (1-nu)Fxyy - wx/r - (wx +w0x)wyy - wx w0yy = 0
+                        #-uyy = Fxxx + (1-nu)Fxyy + wx/r + (wx+w0x)wyy + wx w0yy = 0
+                        #uy = 0 is fully determined by rpnts -1 applications
+                        for m in range(si.size):
+                            i_ind = i_bc0 + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx_BC0[m,n], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                
+                                val_F = s_dxxx_BC0[m,n] + (1-nu)*s_dxyy_BC0[m,n]
+                                val_w = s_dx_BC0[m,n]/r + (wx[i_bc0,j]+w0x[i_bc0, j])*s_dyy_BC0[m,n] + (wyy[i_bc0,j] + w0yy[i_bc0,j])*s_dx_BC0[m,n]
+                                
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_w, ind_1D_F, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_F, ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+
+                elif i == Lpnts - 2:
+                    if bc_type == 'load':
+                        #wx(x=L) = 0
+                        #Fxxx + Fxyy = 0
+                        for m in range(si.size):
+                            i_ind = i_bcL + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx_BCL[m,n], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                    
+                                val = s_dxxx_BCL[m,n] + s_dxyy_BCL[m,n]
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val, ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                    elif bc_type == 'load_vy':
+                        #wx(x=0) = 0
+                        #Set uy to zero by setting uyy to zero 
+                        #-Fxy = uy + vx + wx wy + w0x wy + wx w0y
+                        #-Fxyy = uyy + vxy + wxy wy + wx wyy + w0xy wy + w0x wyy + wxy w0y + wx w0yy
+                        #uyy = -Fxyy - (vxy + wxy wy + wx wyy + w0xy wy + w0x wyy + wxy w0y + wx w0yy)
+                        
+                        #vy = Fxx - nu(Fyy + load) + w/r - wy^2/2 - wy w0y
+                        #vxy = Fxxx - nu(Fxyy) + wx/r - wy wxy - wxy w0y - wy w0xy
+                        
+                        #Finally
+                        #uyy = -Fxyy - (Fxxx - nu(Fxyy) + wx/r - wy wxy - wxy w0y - wy w0xy + wxy wy + wx wyy + w0xy wy + w0x wyy + wxy w0y + wx w0yy)
+                        #uyy = -Fxyy - (Fxxx - nu(Fxyy) + wx/r  + wx wyy + w0x wyy + wx w0yy)
+                        #uyy = -Fxxx - (1-nu)Fxyy - wx/r - (wx +w0x)wyy - wx w0yy = 0
+                        #-uyy = Fxxx + (1-nu)Fxyy + wx/r + (wx+w0x)wyy + wx w0yy = 0
+                        for m in range(si.size):
+                            i_ind = i_bcL + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                if s_dx_BCL[m,n] != 0:
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx_BCL[m,n], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                
+                                val_F = s_dxxx_BCL[m,n] + (1-nu)*s_dxyy_BCL[m,n]
+                                val_w = s_dx_BCL[m,n]/r + (wx[i_bcL,j]+w0x[i_bcL,j])*s_dyy_BCL[m,n] + (wyy[i_bcL,j]+w0yy[i_bcL,j])*s_dx_BCL[m,n]
+                                    
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_w, ind_1D_F, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_F, ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                
+                elif i == Lpnts - 1:
+                    #w(x=0) = 0 or nu*r*load
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, calc1DIndex(i_bcL, j, 0, Lpnts, rpnts))
+                    
+                    if bc_type == 'load':
+                        #Fx(x=0) = 0
+                        for m in range(si.size):
+                            i_ind = i_bcL + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                if s_dx_BCL[m,n] != 0:
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx_BCL[m,n], ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                                    
+                    elif bc_type == 'load_vy':
+                        #vy = Fxx - nu*Fyy + w/r - wy^2/2 = 0 (sets vy = 0)
+                        for m in range(si.size):
+                            i_ind = i_bcL + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                val_F = s_dxx_BCL[m,n] - nu*s_dyy_BCL[m,n]
+                                val_w = s_0_BCL[m,n]/r - (wy[i_bcL,j]+w0y[i_bcL,j])*s_dy_BCL[m,n]
+                                
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_w, ind_1D_F, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_F, ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                
+                else:
+                    for m in range(si.size):
+                        i_ind = i+si[m]
+                        for n in range(sj.size):
+                            j_ind = j+sj[n]
+                            
+                            #Calculate the partials for the current values of i,j,m,n 
+                            partials = calcPartialsSF(partials, w_derivs[:,i,j], w0_derivs[:,i,j], stresses[:,i,j], stencils[:,m,n], consts)
+                            
+                            #Add the partials to the Jacobian
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[0], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[1], ind_1D_w, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[2], ind_1D_F, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[3], ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            
+                    #For every F diffeq have +lamda
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_F, ind_1D_lambda)
+                    
+                    #For the final index, have sum of all F not included in BCs
+                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_lambda, calc1DIndex(i, j, 1, Lpnts, rpnts))
+                    
+                    
+        
+        t1 = time.time()
+        print("Took " + str(t1-t0) + " seconds to get the sparse jacobian matrix rows and cols.")
+        
+        matrixData = matrixData[0:data_ind]
+        matrixRow = matrixRow[0:data_ind]
+        matrixCol = matrixCol[0:data_ind]
+        
+        matrix = (matrixData, (matrixRow, matrixCol))
+        #print(2*Lpnts*rpnts)
+        #print(max(matrixCol))
+        #print(max(matrixRow))
+        #print(min(matrixCol))
+        #print(min(matrixRow))
+        
+        t2 = time.time()
+        print("Took " + str(t2-t1) + " seconds to delete shit.")
+        
+        jacobian = csc_matrix(matrix, shape = (2*Lpnts*rpnts+1, 2*Lpnts*rpnts+1))
+        jacobian.sort_indices() #Sort indices for pypardiso compatibility
+        
+        t3 = time.time()
+        print("Took " + str(t3-t1) + " seconds to create the sparse jacobian matrix.")
+        
+        return jacobian
+    
+    def calcJacobSFSym(self, double[:,:] w, double[:,:] F, double load, bc_type = 'load'):
+        #Assumes the existence of two ghost points
+        #Assumes edge (x= 0) at w[2,:] 
+        #Assumes mirror symmetric about w[:,0], w[:, -1] and w[-1,:] 
+        #Assumes w, F, and w0_derivs are only the one quadrant. 
+        #w[:,-1 + i] = w[:,-1 - i]
+        #w[:,0 - i] = w[:,0 + i]
+        #w[-1+ i,:] = w[-1 -i,:]
+        
+        t0 = time.time()
+        
+        #If I really want to make this faster, then could parallel process it easily, since each i/j coordinate is independent
+        cdef double r = self.r
+        cdef double L = self.L
+        cdef double nu = self.nu
+        
+        cdef double D = self.t**2/(12-12*nu**2)
+        
+        cdef double[:] consts = np.array([D, nu, r, L])
+        
+        cdef int Lpnts = w.shape[0]
+        cdef int rpnts = w.shape[1]
+        
+        dgen = self.dgen
+        
+        cdef int order_x = dgen.order_x
+        cdef int order_y = dgen.order_y
+        
+        #Initialize w deriv arrays
+        cdef double[:,:] wx = dgen.deriv(np.array(w), 1, 0)
+        cdef double[:,:] wy = dgen.deriv(np.array(w), 0, 1)
+        
+        cdef double[:,:] wxx = dgen.deriv(np.array(w), 2, 0)
+        cdef double[:,:] wxy = dgen.deriv(np.array(w), 1, 1)
+        cdef double[:,:] wyy = dgen.deriv(np.array(w), 0, 2)
+
+        cdef double[:,:,:] w_derivs = np.zeros((3, Lpnts, rpnts))
+        w_derivs[0,:,:] = wxx
+        w_derivs[1,:,:] = wxy
+        w_derivs[2,:,:] = wyy
+        
+        #Initialize w0 deriv array
+        cdef double[:,:] w0 = self.w0_derivs[0]
+        cdef double[:,:] w0x = self.w0_derivs[1]
+        cdef double[:,:] w0y = self.w0_derivs[2]
+        cdef double[:,:] w0xx = self.w0_derivs[3]
+        cdef double[:,:] w0xy = self.w0_derivs[4]
+        cdef double[:,:] w0yy = self.w0_derivs[5]
+        
+        cdef double[:,:,:] w0_derivs = self.w0_derivs[3:,:,:]
+        
+        #Stresses are inputs to the formulas at places, so calculate those first
+        cdef double[:,:,:] stresses = np.zeros((3, Lpnts, rpnts))
+        cdef double[:,:] sigx = dgen.deriv(np.array(F), 0, 2) + load
+        cdef double[:,:] sigy = dgen.deriv(np.array(F), 2, 0)
+        cdef double[:,:] tau = -dgen.deriv(np.array(F), 1, 1)
+        stresses[0,:,:] = sigx 
+        stresses[1,:,:] = sigy 
+        stresses[2,:,:] = tau
+        
+        #Initialize stencils
+        cdef double[:,:] s_dxx
+        cdef double[:,:] s_dxy
+        cdef double[:,:] s_dyy
+        cdef double[:,:] s_dxxxx
+        cdef double[:,:] s_dxxyy
+        cdef double[:,:] s_dyyyy
+        
+        cdef double[:,:,:] stencils
+        
+        #Calculate the stencils for all the required derivatives in the bulk 
+        #Edge cases are calculated in the loop
+        
+        cdef double[:,:] sb_dxx = dgen.gen_stencil(2,0)
+        cdef double[:,:] sb_dxy = dgen.gen_stencil(1,1)
+        cdef double[:,:] sb_dyy = dgen.gen_stencil(0,2)
+        
+        cdef double[:,:] sb_dxxxx = dgen.gen_stencil(4,0)
+        cdef double[:,:] sb_dxxyy = dgen.gen_stencil(2,2)
+        cdef double[:,:] sb_dyyyy = dgen.gen_stencil(0,4)
+        
+        cdef double[:,:,:] bulk_stencils = np.zeros((6, 3+2*order_x, 3+2*order_y))
+        
+        bulk_stencils[0,:,:] = sb_dxx
+        bulk_stencils[1,:,:] = sb_dxy
+        bulk_stencils[2,:,:] = sb_dyy
+        
+        bulk_stencils[3,:,:] = sb_dxxxx
+        bulk_stencils[4,:,:] = sb_dxxyy
+        bulk_stencils[5,:,:] = sb_dyyyy
+        
+        #Initialize edge_stencils array in memory
+        cdef double[:,:,:] edge_stencils = np.zeros((6, 4+2*order_x, 3+2*order_y))
+        
+        #Initialize points to be used
+        cdef int[:] si
+        
+        cdef int[:] sbi = np.arange(3+2*order_x) - order_x - 1
+        cdef int[:] sj = np.arange(3+2*order_y) - order_y - 1
+        
+        #Coordinate of x = 0 and x = L given that 2 ghost points are implemented
+        cdef int i_bc0 = 2
+        cdef int i_bcL = Lpnts - 3
+        
+        #A couple derivatives only exist for the boundary (only at i = 2 since symmetry is applied elsewhere)
+        cdef int[:] si_BC0
+        cdef double[:,:,:] BC0_stencils
+        if order_x > 1:
+            si_BC0 = np.arange(4+2*order_x) - i_bc0
+            BC0_stencils = np.zeros((8, 4+2*order_x, 3+2*order_y))
+        else:
+            si_BC0 = sbi
+            BC0_stencils = np.zeros((8, 3+2*order_x, 3+2*order_y))
+        
+        cdef double[:,:] s_0_BC0 = dgen.gen_stencil(0,0, i_bc0)
+        cdef double[:,:] s_dx_BC0 = dgen.gen_stencil(1,0, i_bc0)
+        cdef double[:,:] s_dy_BC0 = dgen.gen_stencil(0,1, i_bc0)
+        cdef double[:,:] s_dxx_BC0 = dgen.gen_stencil(2,0, i_bc0)
+        cdef double[:,:] s_dxy_BC0 = dgen.gen_stencil(1,1, i_bc0)
+        cdef double[:,:] s_dyy_BC0 = dgen.gen_stencil(0,2, i_bc0)
+        cdef double[:,:] s_dxxx_BC0 = dgen.gen_stencil(3,0, i_bc0)
+        cdef double[:,:] s_dxyy_BC0 = dgen.gen_stencil(1,2, i_bc0)
+        
+        BC0_stencils[0,:,:] = s_0_BC0.copy()
+        BC0_stencils[1,:,:] = s_dx_BC0.copy()
+        BC0_stencils[2,:,:] = s_dy_BC0.copy()
+        BC0_stencils[3,:,:] = s_dxx_BC0.copy()
+        BC0_stencils[4,:,:] = s_dxy_BC0.copy()
+        BC0_stencils[5,:,:] = s_dyy_BC0.copy()
+        BC0_stencils[6,:,:] = s_dxxx_BC0.copy()
+        BC0_stencils[7,:,:] = s_dxyy_BC0.copy()
+        
+        cdef int max_points = (4+2*order_x)*(4+2*order_y)*w.size*2*2
+        
+        cdef double[:] matrixData = np.zeros(max_points, dtype = 'float')
+        cdef int[:] matrixRow = np.arange(max_points, dtype = 'int')
+        cdef int[:] matrixCol = np.zeros(max_points, dtype = 'int')
+        
+        cdef int data_ind = 0
+        
+        cdef int ind_1D_w, ind_1D_F
+        cdef int i, j, m, n, k
+        
+        cdef double[:] partials = np.zeros(4)
+        cdef int index 
+        
+        #Restrict jacobian to be generated for reduced subspace
+        Lpnts = int((w.shape[0]+1)/2)
+        rpnts = int(w.shape[1]/2)+1
+        
+        cdef int ind_1D_lambda = 2*Lpnts*rpnts
+        
+        cdef double val_F, val_w
+        
+        for i in range(Lpnts):
+            for j in range(rpnts):
+                #i corresponds to x, where x(i = 0) = -order_x * hx, x(i = order_x) = 0, x(i = Lpnts -1 + order_x) = L, x(i = Lpnts -1 + 2*order_x) = L + order_x*hx
+                #j corresponds to y, where y(j = 0) = 0 and y(j = rpnts - 1) = 2pi r - hy. 
+                
+                #First get stencils for the current axial position (it varies when close to the edge)
+                #If in bulk use bulk stencils
+                if i > order_x:
+                    si = sbi.copy()
+                    stencils = reflectStencils(i, j, si, sj, Lpnts, rpnts, bulk_stencils.copy())
+                #Otherwise generate edge stencils 
+                else:
+                    #Boundary conditions for i = 0 and i = Lpnts-1 are calculated for the second point from the end
+                    if i <= 1:
+                        si = si_BC0
+                        stencils = reflectStencils(i, j, si, sj, Lpnts, rpnts, BC0_stencils.copy())
+                        s_0_BC0 = stencils[0]
+                        s_dx_BC0 = stencils[1]
+                        s_dy_BC0 = stencils[2]
+                        s_dxx_BC0 = stencils[3]
+                        s_dxy_BC0 = stencils[4]
+                        s_dyy_BC0 = stencils[5]
+                        s_dxxx_BC0 = stencils[6]
+                        s_dxyy_BC0 = stencils[7]
+                    else:
+                        s_dxx = dgen.gen_stencil(2,0,i)
+                        s_dxy = dgen.gen_stencil(1,1,i)
+                        s_dyy = dgen.gen_stencil(0,2,i)
+                        
+                        s_dxxxx = dgen.gen_stencil(4,0,i)
+                        s_dxxyy = dgen.gen_stencil(2,2,i)
+                        s_dyyyy = dgen.gen_stencil(0,4,i)
+                        
+                        edge_stencils[0,:,:] = s_dxx
+                        edge_stencils[1,:,:] = s_dxy
+                        edge_stencils[2,:,:] = s_dyy
+                        
+                        edge_stencils[3,:,:] = s_dxxxx
+                        edge_stencils[4,:,:] = s_dxxyy
+                        edge_stencils[5,:,:] = s_dyyyy
+                        
+                        if i <= order_x:
+                            si = np.arange(4+2*order_x) - i
+                
+                        stencils = reflectStencils(i, j, si, sj, Lpnts, rpnts, edge_stencils.copy())
+                
+                
+                ind_1D_w = calc1DIndex(i,j, 0, Lpnts, rpnts)
+                ind_1D_F = calc1DIndex(i,j, 1, Lpnts, rpnts)
+                
+                #first take care of boundary conditions
+                if i == 0:
+                    if bc_type == 'load':
+                        #w(x=0) = 0 or nu*r*load
+                        data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, calc1DIndex(i_bc0, j, 0, Lpnts, rpnts))
+                
+                        #Fx(x=0) = 0 (Standard method)
+                        for m in range(si.size):
+                            i_ind = i_bc0 + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                if s_dx_BC0[m,n] != 0:
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx_BC0[m,n], ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                    
+                    elif bc_type == 'load_vy':
+                        #w(x=0) = 0 or nu*r*load
+                        data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, calc1DIndex(i_bc0, j, 0, Lpnts, rpnts))
+                
+                        #Set vy = 0
+                        #ep2 = sigy - nu*sigx = vy - w/r + wy^2/2 + wy w0y
+                        #Fxx - nu(Fyy + load) = vy - w/r + wy^2/2 + wy w0y
+                        #vy = Fxx - nu(Fyy + load) + w/r - wy^2/2 - wy w0y = 0
+                    
+                        for m in range(si.size):
+                            i_ind = i_bc0 + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                val_F = s_dxx_BC0[m,n] - nu*s_dyy_BC0[m,n]
+                                val_w = s_0_BC0[m,n]/r - (wy[i_bc0,j]+w0y[i_bc0, j])*s_dy_BC0[m,n]
+                                
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_w, ind_1D_F, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_F, ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                    elif bc_type == "free":
+                        #sigx = 0, Fyy = 0
+                        #F(x=0) = 0 
+                        data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_F, calc1DIndex(i_bc0, j, 1, Lpnts, rpnts))
+                        
+                        #wxxx+nu wxyy = 0
+                        
+                        for m in range(si.size):
+                            i_ind = i_bc0 + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                val_w = s_dxxx_BC0[m,n] + nu*s_dxyy_BC0[m,n]
+                                
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_w, ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                
+                                #data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dxx_BC0[m,n], ind_1D_w, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                    
+                    elif bc_type == "free_clamped":
+                        #w(x=0) = 0 or nu*r*load
+                        data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, calc1DIndex(i_bc0, j, 0, Lpnts, rpnts))
+                        
+                        #sigx = 0, Fyy = 0
+                        #F(x=0) = 0 
+                        data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_F, calc1DIndex(i_bc0, j, 1, Lpnts, rpnts))
+                
+                elif i == 1:
+                    if bc_type == 'load':
+                        #wx(x=0) = 0
+                        #Fxxx + Fxyy = 0
+                        for m in range(si.size):
+                            i_ind = i_bc0 + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+                                
+                                if s_dx_BC0[m,n] != 0:
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx_BC0[m,n], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                    
+                                val = s_dxxx_BC0[m,n] + s_dxyy_BC0[m,n]
+                                if val != 0:
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val, ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                    elif bc_type == 'load_vy':
+                        #wx(x=0) = 0
+                        #Set uy to zero by setting uyy to zero 
+                        #-Fxy = uy + vx + wx wy + w0x wy + wx w0y
+                        #-Fxyy = uyy + vxy + wxy wy + wx wyy + w0xy wy + w0x wyy + wxy w0y + wx w0yy
+                        #uyy = -Fxyy - (vxy + wxy wy + wx wyy + w0xy wy + w0x wyy + wxy w0y + wx w0yy)
+                        
+                        #vy = Fxx - nu(Fyy + load) + w/r - wy^2/2 - wy w0y
+                        #vxy = Fxxx - nu(Fxyy) + wx/r - wy wxy - wxy w0y - wy w0xy
+                        
+                        #Finally
+                        #uyy = -Fxyy - (Fxxx - nu(Fxyy) + wx/r - wy wxy - wxy w0y - wy w0xy + wxy wy + wx wyy + w0xy wy + w0x wyy + wxy w0y + wx w0yy)
+                        #uyy = -Fxyy - (Fxxx - nu(Fxyy) + wx/r  + wx wyy + w0x wyy + wx w0yy)
+                        #uyy = -Fxxx - (1-nu)Fxyy - wx/r - (wx +w0x)wyy - wx w0yy = 0
+                        #-uyy = Fxxx + (1-nu)Fxyy + wx/r + (wx+w0x)wyy + wx w0yy = 0
+                        
+                        for m in range(si.size):
+                            i_ind = i_bc0 + si[m]
+                            for n in range(sj.size):
+                                j_ind = j+sj[n]
+
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx_BC0[m,n], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                
+                                val_F = s_dxxx_BC0[m,n] + (1-nu)*s_dxyy_BC0[m,n]
+                                val_w = s_dx_BC0[m,n]/r + (wx[i_bc0,j]+w0x[i_bc0, j])*s_dyy_BC0[m,n] + (wyy[i_bc0,j] + w0yy[i_bc0,j])*s_dx_BC0[m,n]
+                                
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_w, ind_1D_F, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_F, ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                    elif bc_type == "free_clamped":
+                        #wx =  0
+                        for m in range(si.size):
+                                i_ind = i_bc0 + si[m]
+                                for n in range(sj.size):
+                                    j_ind = j+sj[n]
+                                    
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, s_dx_BC0[m,n], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                        
+                        #sum (vy) = 0 (to ensure periodic BCs)
+                        #vy = Fxx - nu(Fyy + load) + w/r - wy^2/2 - wy w0y
+                        #Assume that w is fixed and constant, s.t wy is zero. 
+                        #Sum of Fyy is necessarily zero. 
+                        #So, only really need to do sum of Fxx 
+                        if j == 0:
+                            for m in range(si.size):
+                                i_ind = i_bc0 + si[m]
+                                for n in range(sj.size):
+                                    j_ind = j+sj[n]
+                                    val_F = s_dxx_BC0[m,n]
+                                    val_w = s_0_BC0[m,n]/r
+                                    for k in range(rpnts):
+                                        if k == 0 or k == rpnts - 1:
+                                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_w, ind_1D_F, calc1DIndex(i_ind, j_ind+k, 0, Lpnts, rpnts))
+                                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_F, ind_1D_F, calc1DIndex(i_ind, j_ind+k, 1, Lpnts, rpnts))
+                                        else:
+                                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 2*val_w, ind_1D_F, calc1DIndex(i_ind, j_ind+k, 0, Lpnts, rpnts))
+                                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 2*val_F, ind_1D_F, calc1DIndex(i_ind, j_ind+k, 1, Lpnts, rpnts))
+                        
+                        #Fxy = 0 (tau = 0)
+                        else:
+                            for m in range(si.size):
+                                i_ind = i_bc0 + si[m]
+                                for n in range(sj.size):
+                                    j_ind = j+sj[n]
+                                    
+                                    #tau = 0
+                                    val_F = s_dx_BC0[m,n]
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, -val_F, ind_1D_F, calc1DIndex(i_ind, j_ind-1, 1, Lpnts, rpnts))
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_F, ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                    
+                    elif bc_type == "free":
+                        #wx =  0
+                        for m in range(si.size):
+                                i_ind = i_bc0 + si[m]
+                                for n in range(sj.size):
+                                    j_ind = j+sj[n]
+                                    val_w = s_dxx_BC0[m,n] + nu*s_dyy_BC0[m,n]
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_w, ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                        
+                        #sum (vy) = 0 (to ensure periodic BCs)
+                        #vy = Fxx - nu(Fyy + load) + w/r - wy^2/2 - wy w0y
+                        #Sum of Fyy is necessarily zero. 
+                        if j == 0:
+                            for m in range(si.size):
+                                i_ind = i_bc0 + si[m]
+                                for n in range(sj.size):
+                                    j_ind = j+sj[n]
+                                    val_F = s_dxx_BC0[m,n]
+                                    for k in range(rpnts):
+                                        val_w = s_0_BC0[m,n]/r - (wy[i_bc0, k]+ w0y[i_bc0, k])*s_dy_BC0[m,n]
+                                        
+                                        if k == 0 or k == rpnts - 1:
+                                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_w, ind_1D_F, calc1DIndex(i_ind, j_ind+k, 0, Lpnts, rpnts))
+                                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_F, ind_1D_F, calc1DIndex(i_ind, j_ind+k, 1, Lpnts, rpnts))
+                                        else:
+                                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 2*val_w, ind_1D_F, calc1DIndex(i_ind, j_ind+k, 0, Lpnts, rpnts))
+                                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 2*val_F, ind_1D_F, calc1DIndex(i_ind, j_ind+k, 1, Lpnts, rpnts))
+                        
+                        #Fxy = 0 (tau = 0)
+                        else:
+                            for m in range(si.size):
+                                i_ind = i_bc0 + si[m]
+                                for n in range(sj.size):
+                                    j_ind = j+sj[n]
+                                    
+                                    #tau = 0
+                                    val_F = s_dx_BC0[m,n]
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, -val_F, ind_1D_F, calc1DIndex(i_ind, j_ind-1, 1, Lpnts, rpnts))
+                                    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, val_F, ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                    
+                else:
+                    for m in range(si.size):
+                        i_ind = i+si[m]
+                        for n in range(sj.size):
+                            j_ind = j+sj[n]
+                            
+                            #Calculate the partials for the current values of i,j,m,n 
+                            partials = calcPartialsSF(partials, w_derivs[:,i,j], w0_derivs[:,i,j], stresses[:,i,j], stencils[:,m,n], consts)
+                            
+                            #Add the partials to the Jacobian
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[0], ind_1D_w, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[1], ind_1D_w, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                            
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[2], ind_1D_F, calc1DIndex(i_ind, j_ind, 0, Lpnts, rpnts))
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, partials[3], ind_1D_F, calc1DIndex(i_ind, j_ind, 1, Lpnts, rpnts))
+                    
+                    if bc_type != "free_clamped":
+                    
+                        if bc_type == "free":
+                            pass
+                            #For every w diffeq have +lamda
+                            #data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_w, ind_1D_lambda)
+                            
+                            #For the final index, have sum of all w not included in BCs
+                            #if i > 0 and i < Lpnts - 1 and j > 0 and j < rpnts -1:
+                            #    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 4, ind_1D_lambda, calc1DIndex(i, j, 0, Lpnts, rpnts))
+                            #else:
+                            #    data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_lambda, calc1DIndex(i, j, 0, Lpnts, rpnts))
+                        else:
+                            #For every F diffeq have +lamda
+                            data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_F, ind_1D_lambda)
+                            
+                            #For the final index, have sum of all F not included in BCs. Note, points not on the ends are added 4 times because of the 4 fold symmetry
+                            if i > 0 and i < Lpnts - 1 and j > 0 and j < rpnts -1:
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 4, ind_1D_lambda, calc1DIndex(i, j, 1, Lpnts, rpnts))
+                            else:
+                                data_ind = setValues(data_ind, matrixData, matrixRow, matrixCol, 1, ind_1D_lambda, calc1DIndex(i, j, 1, Lpnts, rpnts))
+            
+        
+        
+        #t1 = time.time()
+        #print("Took " + str(t1-t0) + " seconds to get the sparse jacobian matrix rows and cols.")
+        
+        matrixData = matrixData[0:data_ind]
+        matrixRow = matrixRow[0:data_ind]
+        matrixCol = matrixCol[0:data_ind]
+        
+        matrix = (matrixData, (matrixRow, matrixCol))
+        #print(2*Lpnts*rpnts)
+        #print(max(matrixCol))
+        #print(max(matrixRow))
+        #print(min(matrixCol))
+        #print(min(matrixRow))
+        
+        #t2 = time.time()
+        #print("Took " + str(t2-t1) + " seconds to delete shit.")
+        
+        if bc_type == "free_clamped" or bc_type == "free":
+            jacobian = csc_matrix(matrix, shape = (2*Lpnts*rpnts, 2*Lpnts*rpnts))
+        else:
+            jacobian = csc_matrix(matrix, shape = (2*Lpnts*rpnts+1, 2*Lpnts*rpnts+1))
+            
+        jacobian.sort_indices() #Sort indices for pypardiso compatibility
+        
+        #t3 = time.time()
+        #print("Took " + str(t3-t1) + " seconds to create the sparse jacobian matrix.")
+        
+        return jacobian
+    
+    
+cdef double[:] calcPartials(double[:] partials, double[:] w_derivs, double[:] u_derivs, double[:] v_derivs, double[:] w0_derivs, double[:] sigx_derivs, double[:] sigy_derivs, double[:] tau_derivs, double[:] stencils, double[:] consts, theory):
+    
+    cdef double D = consts[0]
+    cdef double nu = consts[1]
+    cdef double r = consts[2]
+    cdef double L = consts[3]
+    
+    #Initialize deriv arrays
+    cdef double w = w_derivs[0]
+    cdef double wx = w_derivs[1]
+    cdef double wy = w_derivs[2]
+    cdef double wxx = w_derivs[3]
+    cdef double wxy = w_derivs[4]
+    cdef double wyy = w_derivs[5]
+    
+    cdef double ux = u_derivs[0]
+    cdef double uy = u_derivs[1]
+    cdef double uxx = u_derivs[2]
+    cdef double uxy = u_derivs[3]
+    cdef double uyy = u_derivs[4]
+    
+    cdef double vx = v_derivs[0]
+    cdef double vy = v_derivs[1]
+    cdef double vxx = v_derivs[2]
+    cdef double vxy = v_derivs[3]
+    cdef double vyy = v_derivs[4]
+    
+    cdef double w0 = w0_derivs[0]
+    cdef double w0x = w0_derivs[1]
+    cdef double w0y = w0_derivs[2]
+    cdef double w0xx = w0_derivs[3]
+    cdef double w0xy = w0_derivs[4]
+    cdef double w0yy = w0_derivs[5]
+    
+    cdef double s_0 = stencils[0]
+    cdef double s_dx = stencils[1]
+    cdef double s_dy = stencils[2]
+    cdef double s_dxx = stencils[3]
+    cdef double s_dxy = stencils[4]
+    cdef double s_dyy = stencils[5]
+    cdef double s_dxxxx = stencils[6]
+    cdef double s_dxxyy = stencils[7]
+    cdef double s_dyyyy = stencils[8]
+    
+    cdef double sigx = sigx_derivs[0]
+    
+    cdef double sigy = sigy_derivs[0]
+    cdef double sigy_y = sigy_derivs[1]
+    
+    cdef double tau = tau_derivs[0]
+    
+    cdef double sigx_w, sigx_u, sigx_v, sigx_x_w, sigx_x_u, sigx_x_v
+    cdef double sigy_w, sigy_u, sigy_v, sigy_y_w, sigy_y_u, sigy_y_v
+    cdef double tau_w, tau_u, tau_v, tau_x_w, tau_x_u, tau_x_v, tau_y_w, tau_y_u, tau_y_v
+        
+    cdef double ep1_w, ep1_u, ep1_v, ep1_x_w, ep1_x_u, ep1_x_v, ep1_y_w, ep1_y_u, ep1_y_v
+    cdef double ep2_w, ep2_u, ep2_v, ep2_x_w, ep2_x_u, ep2_x_v, ep2_y_w, ep2_y_u, ep2_y_v
+    cdef double gamma_w, gamma_u, gamma_v, gamma_x_w, gamma_x_u, gamma_x_v, gamma_y_w, gamma_y_u, gamma_y_v
+    
+    #Initialize stencils 
+    cdef double w_s_w, w_s_u, w_s_v
+    cdef double u_s_w, u_s_u, u_s_v
+    cdef double v_s_w, v_s_u, v_s_v
+    
+    #First, lets calculate some commonly used partials. 
+    #Lets start with the strains, which depend on which theory is being used
+    if theory == 'Shiftable':
+        #ep1 = ux + wx**2/2 + wx*w0x
+        ep1_w = s_dx*(wx + w0x)
+        ep1_u = s_dx
+        ep1_v = 0
+        
+        ep1_x_w = s_dxx*(wx + w0x) + s_dx*(wxx + w0xx)
+        ep1_x_u = s_dxx
+        ep1_x_v = 0
+        
+        ep1_y_w = s_dxy*(wx + w0x) + s_dx*(wxy + w0xy)
+        ep1_y_u = s_dxy
+        ep1_y_v = 0
+        
+        #ep2 = (1-w/r-w0/r)*vy - w/r + wy**2/2 + wy*w0y
+        ep2_w = -(1+vy)*s_0/r + s_dy*(wy + w0y)
+        ep2_u = 0
+        ep2_v = s_dy*(1-w/r-w0/r)
+        
+        ep2_x_w = -(1+vy)*s_dx/r - vxy*s_0/r + s_dxy*(wy + w0y) + s_dy*(wxy + w0xy)
+        ep2_x_u = 0
+        ep2_x_v = s_dxy*(1-w/r-w0/r) - s_dy*(wx+w0x)/r
+        
+        ep2_y_w = -(1+vy)*s_dy/r - vyy*s_0/r + s_dyy*(wy + w0y) + s_dy*(wyy + w0yy)
+        ep2_y_u = 0
+        ep2_y_v = s_dyy*(1-w/r-w0/r) - s_dy*(wy+w0y)/r
+        
+        #gamma = vx + uy + wx*wy + w0x*wy + wx*w0y
+        gamma_w = s_dx*(wy+w0y) + s_dy*(wx+w0x)
+        gamma_u = s_dy
+        gamma_v = s_dx
+        
+        gamma_x_w = s_dxx*(wy+w0y)+s_dx*(wxy+w0xy) + s_dxy*(wx+w0x)+ s_dy*(wxx + w0xx)
+        gamma_x_u = s_dxy
+        gamma_x_v = s_dxx
+    
+        gamma_y_w = s_dxy*(wy+w0y)+s_dx*(wyy+w0yy) + s_dyy*(wx+w0x)+s_dy*(wxy+w0xy)
+        gamma_y_u = s_dyy
+        gamma_y_v = s_dxy
+        
+    elif theory == 'Donnell':
+        #ep1 = ux + wx**2/2 + wx*w0x
+        ep1_w = s_dx*(wx + w0x)
+        ep1_u = s_dx
+        ep1_v = 0
+        
+        ep1_x_w = s_dxx*(wx + w0x) + s_dx*(wxx + w0xx)
+        ep1_x_u = s_dxx
+        ep1_x_v = 0
+        
+        ep1_y_w = s_dxy*(wx + w0x) + s_dx*(wxy + w0xy)
+        ep1_y_u = s_dxy
+        ep1_y_v = 0
+        
+        #ep2 = vy - w/r + wy**2/2 + wy*w0y
+        ep2_w = -s_0/r + s_dy*(wy + w0y)
+        ep2_u = 0
+        ep2_v = s_dy
+        
+        ep2_x_w = -s_dx/r + s_dxy*(wy + w0y) + s_dy*(wxy + w0xy)
+        ep2_x_u = 0
+        ep2_x_v = s_dxy
+        
+        ep2_y_w = -s_dy/r + s_dyy*(wy + w0y) + s_dy*(wyy + w0yy)
+        ep2_y_u = 0
+        ep2_y_v = s_dyy
+        
+        #gamma = vx + uy + wx*wy + w0x*wy + wx*w0y
+        gamma_w = s_dx*(wy+w0y) + s_dy*(wx+w0x)
+        gamma_u = s_dy
+        gamma_v = s_dx
+        
+        gamma_x_w = s_dxx*(wy+w0y)+s_dx*(wxy+w0xy) + s_dxy*(wx+w0x)+ s_dy*(wxx+w0xx)
+        gamma_x_u = s_dxy
+        gamma_x_v = s_dxx
+        
+        gamma_y_w = s_dxy*(wy+w0y)+s_dx*(wyy+w0yy) + s_dyy*(wx+w0x)+s_dy*(wxy+w0xy)
+        gamma_y_u = s_dyy
+        gamma_y_v = s_dxy
+        
+    elif theory == 'Total':
+        #Placeholder
+        pass
+    
+    #Notation: sigx_y_w is the w partial of the y partial of the axial stress (sigx)
+    sigx_w = (ep1_w + nu*ep2_w)/(1-nu**2)
+    sigx_u = (ep1_u + nu*ep2_u)/(1-nu**2)
+    sigx_v = (ep1_v + nu*ep2_v)/(1-nu**2)
+    
+    sigx_x_w = (ep1_x_w + nu*ep2_x_w)/(1-nu**2)
+    sigx_x_u = (ep1_x_u + nu*ep2_x_u)/(1-nu**2)
+    sigx_x_v = (ep1_x_v + nu*ep2_x_v)/(1-nu**2)
+    
+    sigy_w = (nu*ep1_w + ep2_w)/(1-nu**2)
+    sigy_u = (nu*ep1_u + ep2_u)/(1-nu**2)
+    sigy_v = (nu*ep1_v + ep2_v)/(1-nu**2)
+    
+    sigy_y_w = (nu*ep1_y_w + ep2_y_w)/(1-nu**2)
+    sigy_y_u = (nu*ep1_y_u + ep2_y_u)/(1-nu**2)
+    sigy_y_v = (nu*ep1_y_v + ep2_y_v)/(1-nu**2)
+    
+    tau_w = gamma_w/(2+2*nu)
+    tau_u = gamma_u/(2+2*nu)
+    tau_v = gamma_v/(2+2*nu)
+    
+    tau_x_w = gamma_x_w/(2+2*nu)
+    tau_x_u = gamma_x_u/(2+2*nu)
+    tau_x_v = gamma_x_v/(2+2*nu)
+    
+    tau_y_w = gamma_y_w/(2+2*nu)
+    tau_y_u = gamma_y_u/(2+2*nu)
+    tau_y_v = gamma_y_v/(2+2*nu)
+    
+    #w stability equation
+    # D*(wxxxx + 2wxxyy + wyyyy + w/r**4 + 2(wyy + nu wxx)/r**2) - (1/r+vy/r+ wyy + w0yy) sigy - sigx (wxx + w0xx) - 2 tau (wxy + w0xy) - (wy+w0y)*(w*sigy_y + wy*sigy)/r= 0
+    if theory == 'Shiftable':
+        w_s_w = D*(s_dxxxx + 2*s_dxxyy + s_dyyyy + s_0/r**4 + 2*s_dyy/r**2 + 2*nu*s_dxx/r**2)
+    
+        #Next sigx (wxx + w0xx) term
+        w_s_w -= (wxx + w0xx)*sigx_w
+        w_s_w -= s_dxx*sigx
+        
+        #Next sigy(wyy + w0yy) term
+        w_s_w -= (1/r + vy/r + wyy+w0yy)*sigy_w
+        w_s_w -= s_dyy*sigy
+        
+        #Next tau(wxy  w0xy) term
+        w_s_w -= 2*(wxy+w0xy)*tau_w
+        w_s_w -= 2*s_dxy*tau
+        
+        #Next do (wy+w0y)*((w+w0)*sigy_y + (w0y+wy)*sigy)/r
+        w_s_w -= s_dy*((w+w0)*sigy_y + (wy+w0y)*sigy)/r 
+        w_s_w -= (wy + w0y)*(s_0*sigy_y + (w+w0)*sigy_y_w + s_dy*sigy + (wy+w0y)*sigy_w)/r
+            
+        #Repeat process for partial u
+        w_s_u =  - (1/r+vy/r+ wyy + w0yy)*sigy_u - (wxx + w0xx)*sigx_u - 2*(wxy + w0xy)*tau_u
+        w_s_u -= (wy + w0y)*((w+w0)*sigy_y_u + (wy+w0y)*sigy_u)/r
+        
+        #Again for v
+        w_s_v = - (1/r+vy/r + wyy + w0yy)*sigy_v - s_dy*sigy/r - (wxx + w0xx)*sigx_v - 2*(wxy + w0xy)*tau_v
+        w_s_v -= (wy + w0y)*((w+w0)*sigy_y_v + (wy+w0y)*sigy_v)/r
+    
+        #u stability equation
+        #sigx_x + tau_y = 0 
+        u_s_w = sigx_x_w + tau_y_w
+        u_s_u = sigx_x_u + tau_y_u
+        u_s_v = sigx_x_v + tau_y_v
+        
+        #v stability equation
+        #(1-w/r-w0/r)*sigy_y + D[tau, x] - (wy+w0y)*sigy/r = 0
+        v_s_w = (1-w/r-w0/r)*sigy_y_w - s_0*sigy_y/r + tau_x_w - (s_dy*sigy + (wy+w0y)*sigy_w)/r
+        v_s_u = (1-w/r-w0/r)*sigy_y_u + tau_x_u - (wy+w0y)*sigy_u/r
+        v_s_v = (1-w/r-w0/r)*sigy_y_v + tau_x_v - (wy+w0y)*sigy_v/r
+    elif theory == 'Donnell':
+        w_s_w = D*(s_dxxxx + 2*s_dxxyy + s_dyyyy)
+    
+        #Next sigx (wxx + w0xx) term
+        w_s_w -= (wxx + w0xx)*sigx_w
+        w_s_w -= s_dxx*sigx
+        
+        #Next sigy(1/r + wyy + w0yy) term
+        w_s_w -= (1/r + wyy + w0yy)*sigy_w
+        w_s_w -= s_dyy*sigy
+        
+        #Next tau(wxy  w0xy) term
+        w_s_w -= 2*(wxy+w0xy)*tau_w
+        w_s_w -= 2*s_dxy*tau
+        
+        #Repeat process for partial u
+        w_s_u = -(1/r + wyy + w0yy)*sigy_u - (wxx + w0xx)*sigx_u - 2*(wxy + w0xy)*tau_u
+        
+        #Again for v
+        w_s_v = -(1/r + wyy + w0yy)*sigy_v - (wxx + w0xx)*sigx_v - 2*(wxy + w0xy)*tau_v
+        
+        #u stability equation
+        #sigx_x + tau_y = 0 
+        u_s_w = sigx_x_w + tau_y_w
+        u_s_u = sigx_x_u + tau_y_u
+        u_s_v = sigx_x_v + tau_y_v
+        
+        #v stability equation
+        #sigy_y + tau_x = 0
+        v_s_w = sigy_y_w + tau_x_w
+        v_s_u = sigy_y_u + tau_x_u
+        v_s_v = sigy_y_v + tau_x_v
+    elif theory == 'Total':
+        #placeholder
+        pass
+    
+    partials[0] = w_s_w
+    partials[1] = w_s_u
+    partials[2] = w_s_v
+    
+    partials[3] = u_s_w
+    partials[4] = u_s_u
+    partials[5] = u_s_v
+    
+    partials[6] = v_s_w
+    partials[7] = v_s_u
+    partials[8] = v_s_v
+    
+    return partials
+
+cdef double[:] calcPartialsTVar(double[:] partials, double[:] w_derivs, double[:] u_derivs, double[:] v_derivs, double[:] w0_derivs, double[:] t_derivs, double[:] sigx_derivs, double[:] sigy_derivs, double[:] tau_derivs, double[:] stencils, double[:] consts, theory):
+    
+    cdef double nu = consts[0]
+    cdef double r = consts[1]
+    cdef double L = consts[2]
+    
+    #Initialize deriv arrays
+    cdef double w = w_derivs[0]
+    cdef double wx = w_derivs[1]
+    cdef double wy = w_derivs[2]
+    cdef double wxx = w_derivs[3]
+    cdef double wxy = w_derivs[4]
+    cdef double wyy = w_derivs[5]
+    
+    cdef double ux = u_derivs[0]
+    cdef double uy = u_derivs[1]
+    cdef double uxx = u_derivs[2]
+    cdef double uxy = u_derivs[3]
+    cdef double uyy = u_derivs[4]
+    
+    cdef double vx = v_derivs[0]
+    cdef double vy = v_derivs[1]
+    cdef double vxx = v_derivs[2]
+    cdef double vxy = v_derivs[3]
+    cdef double vyy = v_derivs[4]
+    
+    cdef double w0 = w0_derivs[0]
+    cdef double w0x = w0_derivs[1]
+    cdef double w0y = w0_derivs[2]
+    cdef double w0xx = w0_derivs[3]
+    cdef double w0xy = w0_derivs[4]
+    cdef double w0yy = w0_derivs[5]
+    
+    cdef double t = w0_derivs[0]
+    cdef double tx = w0_derivs[1]
+    cdef double ty = w0_derivs[2]
+    cdef double txx = w0_derivs[3]
+    cdef double txy = w0_derivs[4]
+    cdef double tyy = w0_derivs[5]
+    
+    cdef double s_0 = stencils[0]
+    cdef double s_dx = stencils[1]
+    cdef double s_dy = stencils[2]
+    cdef double s_dxx = stencils[3]
+    cdef double s_dxy = stencils[4]
+    cdef double s_dyy = stencils[5]
+    cdef double s_dxxx = stencils[6]
+    cdef double s_dxxy = stencils[7]
+    cdef double s_dxyy = stencils[8]
+    cdef double s_dyyy = stencils[9]
+    cdef double s_dxxxx = stencils[10]
+    cdef double s_dxxyy = stencils[11]
+    cdef double s_dyyyy = stencils[12]
+    
+    cdef double sigx = sigx_derivs[0]
+    
+    cdef double sigy = sigy_derivs[0]
+    cdef double sigy_y = sigy_derivs[1]
+    
+    cdef double tau = tau_derivs[0]
+    
+    cdef double sigx_w, sigx_u, sigx_v, sigx_x_w, sigx_x_u, sigx_x_v
+    cdef double sigy_w, sigy_u, sigy_v, sigy_y_w, sigy_y_u, sigy_y_v
+    cdef double tau_w, tau_u, tau_v, tau_x_w, tau_x_u, tau_x_v, tau_y_w, tau_y_u, tau_y_v
+        
+    cdef double ep1_w, ep1_u, ep1_v, ep1_x_w, ep1_x_u, ep1_x_v, ep1_y_w, ep1_y_u, ep1_y_v
+    cdef double ep2_w, ep2_u, ep2_v, ep2_x_w, ep2_x_u, ep2_x_v, ep2_y_w, ep2_y_u, ep2_y_v
+    cdef double gamma_w, gamma_u, gamma_v, gamma_x_w, gamma_x_u, gamma_x_v, gamma_y_w, gamma_y_u, gamma_y_v
+    
+    #Initialize stencils 
+    cdef double w_s_w, w_s_u, w_s_v
+    cdef double u_s_w, u_s_u, u_s_v
+    cdef double v_s_w, v_s_u, v_s_v
+    
+    #First, lets calculate some commonly used partials. 
+    #Lets start with the strains, which depend on which theory is being used
+    if theory == 'Shiftable':
+        #ep1 = ux + wx**2/2 + wx*w0x
+        ep1_w = s_dx*(wx + w0x)
+        ep1_u = s_dx
+        ep1_v = 0
+        
+        ep1_x_w = s_dxx*(wx + w0x) + s_dx*(wxx + w0xx)
+        ep1_x_u = s_dxx
+        ep1_x_v = 0
+        
+        ep1_y_w = s_dxy*(wx + w0x) + s_dx*(wxy + w0xy)
+        ep1_y_u = s_dxy
+        ep1_y_v = 0
+        
+        #ep2 = (1-w/r-w0/r)*vy - w/r + wy**2/2 + wy*w0y
+        ep2_w = -(1+vy)*s_0/r + s_dy*(wy + w0y)
+        ep2_u = 0
+        ep2_v = s_dy*(1-w/r-w0/r)
+        
+        ep2_x_w = -(1+vy)*s_dx/r - vxy*s_0/r + s_dxy*(wy + w0y) + s_dy*(wxy + w0xy)
+        ep2_x_u = 0
+        ep2_x_v = s_dxy*(1-w/r-w0/r) - s_dy*(wx+w0x)/r
+        
+        ep2_y_w = -(1+vy)*s_dy/r - vyy*s_0/r + s_dyy*(wy + w0y) + s_dy*(wyy + w0yy)
+        ep2_y_u = 0
+        ep2_y_v = s_dyy*(1-w/r-w0/r) - s_dy*(wy+w0y)/r
+        
+        #gamma = vx + uy + wx*wy + w0x*wy + wx*w0y
+        gamma_w = s_dx*(wy+w0y) + s_dy*(wx+w0x)
+        gamma_u = s_dy
+        gamma_v = s_dx
+        
+        gamma_x_w = s_dxx*(wy+w0y)+s_dx*(wxy+w0xy) + s_dxy*(wx+w0x)+ s_dy*(wxx + w0xx)
+        gamma_x_u = s_dxy
+        gamma_x_v = s_dxx
+    
+        gamma_y_w = s_dxy*(wy+w0y)+s_dx*(wyy+w0yy) + s_dyy*(wx+w0x)+s_dy*(wxy+w0xy)
+        gamma_y_u = s_dyy
+        gamma_y_v = s_dxy
+        
+    elif theory == 'Donnell':
+        #ep1 = ux + wx**2/2 + wx*w0x
+        ep1_w = s_dx*(wx + w0x)
+        ep1_u = s_dx
+        ep1_v = 0
+        
+        ep1_x_w = s_dxx*(wx + w0x) + s_dx*(wxx + w0xx)
+        ep1_x_u = s_dxx
+        ep1_x_v = 0
+        
+        ep1_y_w = s_dxy*(wx + w0x) + s_dx*(wxy + w0xy)
+        ep1_y_u = s_dxy
+        ep1_y_v = 0
+        
+        #ep2 = vy - w/r + wy**2/2 + wy*w0y
+        ep2_w = -s_0/r + s_dy*(wy + w0y)
+        ep2_u = 0
+        ep2_v = s_dy
+        
+        ep2_x_w = -s_dx/r + s_dxy*(wy + w0y) + s_dy*(wxy + w0xy)
+        ep2_x_u = 0
+        ep2_x_v = s_dxy
+        
+        ep2_y_w = -s_dy/r + s_dyy*(wy + w0y) + s_dy*(wyy + w0yy)
+        ep2_y_u = 0
+        ep2_y_v = s_dyy
+        
+        #gamma = vx + uy + wx*wy + w0x*wy + wx*w0y
+        gamma_w = s_dx*(wy+w0y) + s_dy*(wx+w0x)
+        gamma_u = s_dy
+        gamma_v = s_dx
+        
+        gamma_x_w = s_dxx*(wy+w0y)+s_dx*(wxy+w0xy) + s_dxy*(wx+w0x)+ s_dy*(wxx+w0xx)
+        gamma_x_u = s_dxy
+        gamma_x_v = s_dxx
+        
+        gamma_y_w = s_dxy*(wy+w0y)+s_dx*(wyy+w0yy) + s_dyy*(wx+w0x)+s_dy*(wxy+w0xy)
+        gamma_y_u = s_dyy
+        gamma_y_v = s_dxy
+        
+    elif theory == 'Total':
+        #Placeholder
+        pass
+    
+    #Notation: sigx_y_w is the w partial of the y partial of the axial stress (sigx)
+    sigx_w = (ep1_w + nu*ep2_w)/(1-nu**2)
+    sigx_u = (ep1_u + nu*ep2_u)/(1-nu**2)
+    sigx_v = (ep1_v + nu*ep2_v)/(1-nu**2)
+    
+    sigx_x_w = (ep1_x_w + nu*ep2_x_w)/(1-nu**2)
+    sigx_x_u = (ep1_x_u + nu*ep2_x_u)/(1-nu**2)
+    sigx_x_v = (ep1_x_v + nu*ep2_x_v)/(1-nu**2)
+    
+    sigy_w = (nu*ep1_w + ep2_w)/(1-nu**2)
+    sigy_u = (nu*ep1_u + ep2_u)/(1-nu**2)
+    sigy_v = (nu*ep1_v + ep2_v)/(1-nu**2)
+    
+    sigy_y_w = (nu*ep1_y_w + ep2_y_w)/(1-nu**2)
+    sigy_y_u = (nu*ep1_y_u + ep2_y_u)/(1-nu**2)
+    sigy_y_v = (nu*ep1_y_v + ep2_y_v)/(1-nu**2)
+    
+    tau_w = gamma_w/(2+2*nu)
+    tau_u = gamma_u/(2+2*nu)
+    tau_v = gamma_v/(2+2*nu)
+    
+    tau_x_w = gamma_x_w/(2+2*nu)
+    tau_x_u = gamma_x_u/(2+2*nu)
+    tau_x_v = gamma_x_v/(2+2*nu)
+    
+    tau_y_w = gamma_y_w/(2+2*nu)
+    tau_y_u = gamma_y_u/(2+2*nu)
+    tau_y_v = gamma_y_v/(2+2*nu)
+    
+    #w stability equation
+    # D*(wxxxx + 2wxxyy + wyyyy + w/r**4 + 2(wyy + nu wxx)/r**2) - (1/r+vy/r+ wyy + w0yy) sigy - sigx (wxx + w0xx) - 2 tau (wxy + w0xy) - (wy+w0y)*(w*sigy_y + wy*sigy)/r= 0
+    if theory == 'Shiftable':
+        w_s_w = (t**3/(12*(1-nu**2)))*(s_dxxxx + 2*s_dxxyy + s_dyyyy + s_0/r**4 + 2*s_dyy/r**2 + 2*nu*s_dxx/r**2)
+    
+        #Next sigx (wxx + w0xx) term
+        w_s_w -= t*(wxx + w0xx)*sigx_w
+        w_s_w -= t*s_dxx*sigx
+        
+        #Next sigy(wyy + w0yy) term
+        w_s_w -= t*(1/r + vy/r + wyy+w0yy)*sigy_w
+        w_s_w -= t*s_dyy*sigy
+        
+        #Next tau(wxy  w0xy) term
+        w_s_w -= 2*t*(wxy+w0xy)*tau_w
+        w_s_w -= 2*t*s_dxy*tau
+        
+        #Next do (wy+w0y)*((w+w0)*sigy_y + (w0y+wy)*sigy)/r
+        w_s_w -= t*s_dy*((w+w0)*sigy_y + (wy+w0y)*sigy)/r 
+        w_s_w -= t*(wy + w0y)*(s_0*sigy_y + (w+w0)*sigy_y_w + s_dy*sigy + (wy+w0y)*sigy_w)/r
+            
+        #Repeat process for partial u
+        w_s_u =  - t*(1/r+vy/r+ wyy + w0yy)*sigy_u - t*(wxx + w0xx)*sigx_u - 2*t*(wxy + w0xy)*tau_u
+        w_s_u -= t*(wy + w0y)*((w+w0)*sigy_y_u + (wy+w0y)*sigy_u)/r
+        
+        #Again for v
+        w_s_v = - t*(1/r+vy/r + wyy + w0yy)*sigy_v - t*s_dy*sigy/r - t*(wxx + w0xx)*sigx_v - 2*t*(wxy + w0xy)*tau_v
+        w_s_v -= t*(wy + w0y)*((w+w0)*sigy_y_v + (wy+w0y)*sigy_v)/r
+    
+        #u stability equation
+        #sigx_x + tau_y = 0 
+        u_s_w = t*sigx_x_w + t*tau_y_w
+        u_s_u = t*sigx_x_u + t*tau_y_u
+        u_s_v = t*sigx_x_v + t*tau_y_v
+        
+        #v stability equation
+        #(1-w/r-w0/r)*sigy_y + D[tau, x] - (wy+w0y)*sigy/r = 0
+        v_s_w = t*(1-w/r-w0/r)*sigy_y_w - t*s_0*sigy_y/r + t*tau_x_w - t*(s_dy*sigy + (wy+w0y)*sigy_w)/r
+        v_s_u = t*(1-w/r-w0/r)*sigy_y_u + t*tau_x_u - t*(wy+w0y)*sigy_u/r
+        v_s_v = t*(1-w/r-w0/r)*sigy_y_v + t*tau_x_v - t*(wy+w0y)*sigy_v/r
+    elif theory == 'Donnell':
+        w_s_w = (t**3/(12*(1-nu**2)))*(s_dxxxx + 2*s_dxxyy + s_dyyyy)
+        
+        w_s_w += t**2 * txx *(nu*s_dyy + s_dxx) / (4*(1-nu**2))
+        w_s_w += t**2 * tyy *(s_dyy + nu*s_dxx) / (4*(1-nu**2))
+        w_s_w += t**2 * txy *(s_dxy) / (2*(1+nu))
+        
+        w_s_w += t * tx * (tx *(nu*s_dyy + s_dxx) + t*(s_dxyy + s_dxxx)) / (2*(1-nu**2))
+        w_s_w += t * ty * (ty *(s_dyy + nu*s_dxx) + t*(s_dyyy + s_dxxy)) / (2*(1-nu**2))
+        
+        #Next sigx (wxx + w0xx) term
+        w_s_w -= t*(wxx + w0xx)*sigx_w
+        w_s_w -= t*s_dxx*sigx
+        
+        #Next sigy(1/r + wyy + w0yy) term
+        w_s_w -= t*(1/r + wyy + w0yy)*sigy_w
+        w_s_w -= t*s_dyy*sigy
+        
+        #Next tau(wxy  w0xy) term
+        w_s_w -= 2*t*(wxy+w0xy)*tau_w
+        w_s_w -= 2*t*s_dxy*tau
+        
+        #Repeat process for partial u
+        w_s_u = -t*(1/r + wyy + w0yy)*sigy_u - t*(wxx + w0xx)*sigx_u - 2*t*(wxy + w0xy)*tau_u
+        
+        #Again for v
+        w_s_v = -t*(1/r + wyy + w0yy)*sigy_v - t*(wxx + w0xx)*sigx_v - 2*t*(wxy + w0xy)*tau_v
+        
+        #u stability equation
+        # t sigx_x + t_x sigx + t tau_y + ty tau= 0 
+        u_s_w = t*sigx_x_w + tx*sigx_w + t*tau_y_w + ty*tau_w
+        u_s_u = t*sigx_x_u + tx*sigx_u + t*tau_y_u + ty*tau_u
+        u_s_v = t*sigx_x_v + tx*sigx_v + t*tau_y_v + ty*tau_v
+        
+        #v stability equation
+        #t sigy_y + ty sigy + t tau_x + tx tau= 0
+        v_s_w = t*sigy_y_w + ty*sigy_w + t*tau_x_w + tx*tau_w
+        v_s_u = t*sigy_y_u + ty*sigy_u + t*tau_x_u + tx*tau_u
+        v_s_v = t*sigy_y_v + ty*sigy_v + t*tau_x_v + tx*tau_v
+    elif theory == 'Total':
+        #placeholder
+        pass
+    
+    partials[0] = w_s_w
+    partials[1] = w_s_u
+    partials[2] = w_s_v
+    
+    partials[3] = u_s_w
+    partials[4] = u_s_u
+    partials[5] = u_s_v
+    
+    partials[6] = v_s_w
+    partials[7] = v_s_u
+    partials[8] = v_s_v
+    
+    return partials
+
+
+cdef double[:] calcPartialsSF(double[:] partials, double[:] w_derivs, double[:] w0_derivs, double[:] stresses, double[:] stencils, double[:] consts):
+    
+    cdef double D = consts[0]
+    cdef double nu = consts[1]
+    cdef double r = consts[2]
+    cdef double L = consts[3]
+    
+    #Initialize deriv arrays
+    cdef double wxx = w_derivs[0]
+    cdef double wxy = w_derivs[1]
+    cdef double wyy = w_derivs[2]
+    
+    cdef double w0xx = w0_derivs[0]
+    cdef double w0xy = w0_derivs[1]
+    cdef double w0yy = w0_derivs[2]
+    
+    cdef double s_dxx = stencils[0]
+    cdef double s_dxy = stencils[1]
+    cdef double s_dyy = stencils[2]
+    cdef double s_dxxxx = stencils[3]
+    cdef double s_dxxyy = stencils[4]
+    cdef double s_dyyyy = stencils[5]
+    
+    cdef double sigx = stresses[0]
+    cdef double sigy = stresses[1]
+    cdef double tau = stresses[2]
+    
+    #Initialize stencils 
+    cdef double w_s_w, w_s_F
+    cdef double F_s_w, F_s_F
+    
+    #w stability equation
+    # D*(wxxxx + 2wxxyy + wyyyy) - (1/r+ wyy + w0yy)Fxx - (Fyy + load) (wxx + w0xx) - 2 (-Fxy) (wxy + w0xy) = 0
+    w_s_w = D*(s_dxxxx + 2*s_dxxyy + s_dyyyy) - s_dxx*sigx - s_dyy*sigy - 2*s_dxy*tau
+    w_s_F = -s_dxx*(1/r + wyy + w0yy) - s_dyy*(wxx+w0xx) + 2*s_dxy*(wxy+w0xy)
+    
+    #F stability equation
+    #Fxxxx + Fyyyy + 2*Fxxyy - wxy**2 - 2*wxy*w0xy + wxx/r + wxx*wyy + w0xx*wyy + wxx*w0yy = 0
+    F_s_w = -2*s_dxy*(wxy + w0xy) + s_dxx/r + s_dxx*(wyy + w0yy) + s_dyy*(wxx + w0xx)
+    F_s_F = s_dxxxx + 2*s_dxxyy + s_dyyyy
+    
+    partials[0] = w_s_w
+    partials[1] = w_s_F
+    
+    partials[2] = F_s_w
+    partials[3] = F_s_F
+    
+    return partials
+
+
+cdef double[:,:,:] reflectStencils(int i, int j, int[:] si, int[:] sj, int Lpnts, int rpnts, double [:,:,:] stencils):
+        
+        cdef int nmax = stencils.shape[0]
+        cdef int k, m, n, index
+        
+        #Modify the stencils if close to a symmetry point
+        #Reflection about the x = L/2 axis
+        if i + si[-1] > Lpnts - 1: 
+            #index = np.where(j + sj == Lpnts - 1)[0][0]
+            
+            index = (si.size - 1) - (i + si[-1] - (Lpnts -1))
+            
+            #for k in range(si.size):
+            #    if i + si[-1 - i] == Lpnts - 1:
+            #        index = i 
+            #        break
+                    
+            for k in range(si.size - 1 - index):
+                for m in range(sj.size):
+                    for n in range(nmax):
+                        stencils[n,index - (k+1),m] = stencils[n,index - (k+1),m] + stencils[n,index + (k+1),m]
+                        stencils[n,index + (k+1),m] = 0
+        
+        #Reflection about the y = pi*r axis
+        if j + sj[-1] > rpnts - 1:
+            #index = np.where(j + sj == rpnts - 1)[0][0]
+            index = (sj.size - 1) - (j + sj[-1] - (rpnts -1))
+            
+            for k in range(sj.size - 1 - index):
+                for m in range(si.size):
+                    for n in range(nmax):
+                        stencils[n, m, index - (k+1)] = stencils[n, m, index - (k+1)] + stencils[n, m,index + k + 1]
+                        stencils[n, m, index + (k+1)] = 0
+        
+        #Reflection about the y = 0 axis
+        elif j + sj[0] < 0:
+            #index = np.where(j + sj == 0)[0][0] #can probably do this without np.where
+            index = -(j + sj[0])
+            for k in range(index):
+                for m in range(si.size):
+                    for n in range(nmax):
+                        stencils[n, m, index + (k+1)] = stencils[n, m, index + (k+1)] + stencils[n, m, index - (k+1)]
+                        stencils[n, m, index - (k+1)] = 0
+        
+        return stencils
+
+cdef int calc1DIndex(int i, int j, int disp, int Lpnts, int rpnts):
+    #disp = 0 is w, 1 is u, 2 is v
+    #calculates the 1D index from a 2D coordinates 
+    cdef int ind
+        
+    if j >= 0 and j <= rpnts-1:
+        ind = j + rpnts*i
+    elif j < 0:
+        ind = rpnts + j + rpnts*i
+    elif j > rpnts-1:
+        ind = j - rpnts + rpnts*i
+        
+    if disp == 0:
+        return ind
+    elif disp == 1:
+        return ind + Lpnts*rpnts
+    elif disp == 2:
+        return ind + 2*Lpnts*rpnts
+
+cdef int setValues(int ind, double[:] matrixData, int[:] matrixRow, int[:] matrixCol, double val, int row, int col):
+    if val != 0:
+        matrixData[ind] = val
+        matrixRow[ind] = row
+        matrixCol[ind] = col
+        return ind+1
+    else:
+        return ind
