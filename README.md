@@ -94,5 +94,9 @@ The buckling load is determined by taking advantage of the fact that, when the s
 I slowly and incrementally increase the load, introduced by increasing $\delta$, until the a solution cannot be found. 
 The largest load for which a stable solution can be found is a good approximation of the buckling load when the step size is small.
 
-The code is written in python and uses Intel's Parallel Direct Sparse Solver Interface (PARDISO) to solve sparse matrices whenever required.
+The code is written in python 3 and uses Intel's Parallel Direct Sparse Solver Interface (PARDISO) to solve sparse matrices whenever required. 
+Scripting is achieved throught he use of jupyter notebooks. 
+Analytical computation of the Jacobian is sped up through the use of Cython. 
+
+
 
