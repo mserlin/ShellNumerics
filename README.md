@@ -57,19 +57,16 @@ $` \frac{\partial}{\partial y}(t\sigma_y) + \frac{\partial}{\partial x}(t\tau) =
 
 where all the variables in the above equations are functions of both $x$ and $y$. 
 
-When there are no radial geometric imperfections, i.e. $w_0 = 0$, and the thickness is perfectly uniform such that $t(x,y) = t_{u}$, S8 simplifies to the cleaner, more familiar expression: 
+When there are no radial geometric imperfections, i.e. $w_0 = 0$, and the thickness is perfectly uniform such that $t(x,y) = t_{u}$, the equation simplifies to the cleaner, more familiar expression: 
 
 $` \frac{Et_{u}^3}{12(1-\nu^2)}(w_{xxxx} + 2w_{xxyy} + w_{yyyy}) + t_{u} \sigma_x w_{xx} + t_{u}\sigma_y w_{yy} + 2 t_{u} \tau w_{xy} = 0 `$
-
-Traditionally, equations S9 and S10 are combined into a single equation by introducing a stress function\cite{brushBuckling1975, timoshenkoTheory1972}.
-However, realistic boundary conditions are more challenging to implement in this formulation. 
-For simplicity, I elect to directly solve the three equations, which are functions of the axial, circumferential, and radial displacement functions.
 
 Our boundary conditions are chosen such that the end of the shell maintains complete contact with the parallel loading plates at points held fixed by friction.
 The friction requirement implies that the radial and circumferential displacements are zero at the end of the cylinder.
 The contact requirement implies that the axial displacement at the ends are constant in the circumferential direction, and that the end of the shell remains normal to the loading plate.
 The load on the shell is introduced by the value chosen for the end displacement, $\delta$, fixed by the parallel loading plates. 
 The complete boundary conditions for a shell of length $L$ are written as: 
+
 $` w(x = 0/L, y) = 0 `$
 
 $` w_x(x = 0/L, y) = 0 `$
