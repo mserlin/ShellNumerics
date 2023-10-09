@@ -24,7 +24,7 @@ The deformation are captured by separate variables; in the axial direction, circ
 If the shell is imperfect and has variations in its curvature when unloaded, these are reflected by radial deformations $w_0(x,y)$.
 The shell's thickness is given by $t(x,y)$, and, in generality, can vary spatially. 
 The shell is taken to have a constant Poisson ratio of $\nu$ and Young's modulus of $E$. 
-In the rest of this section, we use the shorthand, $w(x,y) = w$, $\frac{\partial w(x,y)}{\partial x} = w_x$ and $\frac{\partial^2 w(x,y)}{\partial x^2} = w_{xx}$, etc... 
+In the rest of this section, I use the shorthand, $w(x,y) = w$, $\frac{\partial w(x,y)}{\partial x} = w_x$ and $\frac{\partial^2 w(x,y)}{\partial x^2} = w_{xx}$, etc... 
 
 The strain in the axial direction, $\epsilon_1$, circumferential direction, $\epsilon_2$, and shear strain $\gamma$ at the middle surface are given by:
 
@@ -34,7 +34,7 @@ $`\epsilon_2 = v_y + \frac{w}{r} + \frac{1}{2}w_y^2 + w_y w_{0,y} `$
 
 $` \gamma = v_x + u_y + w_x w_y + w_{0,x} w_y + w_x w_{0,y} `$
 
-where we have chosen the sign convention that outwards radial deformations are positive.
+where I have chosen the sign convention that outwards radial deformations are positive.
 
 The stress in the axial direction, $\sigma_1$, circumferential direction, $\sigma_2$, and shear strain, $\tau$, at the middle surface are given by:
 
@@ -63,7 +63,7 @@ $` \frac{Et_{u}^3}{12(1-\nu^2)}(w_{xxxx} + 2w_{xxyy} + w_{yyyy}) + t_{u} \sigma_
 
 Traditionally, equations S9 and S10 are combined into a single equation by introducing a stress function\cite{brushBuckling1975, timoshenkoTheory1972}.
 However, realistic boundary conditions are more challenging to implement in this formulation. 
-For simplicity, we elect to directly solve the three equations, which are functions of the axial, circumferential, and radial displacement functions.
+For simplicity, I elect to directly solve the three equations, which are functions of the axial, circumferential, and radial displacement functions.
 
 Our boundary conditions are chosen such that the end of the shell maintains complete contact with the parallel loading plates at points held fixed by friction.
 The friction requirement implies that the radial and circumferential displacements are zero at the end of the cylinder.
@@ -85,35 +85,17 @@ At each $(x,y)$ coordinate, the continuous derivatives are replaced by their fin
 One-dimensional finite difference approximations of the derivatives are computed to arbitrary order using the Bjork-Pereyra algorithm, where an order of $N$ introduce errors that scale as $O(dx^{N})$ and $O(dy^{N})$.
 Matrix representations of the two dimensional derivative operators, e.g. $\frac{\partial^2}{\partial x \partial y}$, are computed from outer products of the matrix representations of the one-dimensional operators.
 Whenever possible, the finite difference approximations are central difference operators.
-Near the ends of the cylinder, where $x = 0/L$ and the points required for a central difference approximation do not exist in both direction, we compute new finite difference operators that use more points, such that the accuracy of the approximation remains of same order.
+Near the ends of the cylinder, where $x = 0/L$ and the points required for a central difference approximation do not exist in both direction, I compute new finite difference operators that use more points, such that the accuracy of the approximation remains of same order.
 The boundary conditions specified in the previous section are incorporated as additional constraints.
 
 The discretization generates a non-linear system of equations whose solution approximates the shell's equilibrium deformations.
-We numerically compute the solution using a modified Newton-Raphson method, where the Jacobian is calculated analytically. 
+I numerically compute the solution using a modified Newton-Raphson method, where the Jacobian is calculated analytically. 
 The Jacobian of the shell for the equilibrium deformations at a given end displacement, or load, is used to calculate the shell's eigenmodes with the smallest eigenvalues. 
 Specifically, they are calculated using standard numerical techniques from a representation of the Jacobian's inverse in the basis of its Krylov subspace.
 
 The buckling load is determined by taking advantage of the fact that, when the structure is unstable, the Newton-Raphson method fails to converge.
-We slowly and incrementally increase the load, introduced by increasing $\delta$, until the a solution cannot be found. 
+I slowly and incrementally increase the load, introduced by increasing $\delta$, until the a solution cannot be found. 
 The largest load for which a stable solution can be found is a good approximation of the buckling load when the step size is small.
-This is demonstrated by the fact that the eigenvalue of the lowest value eigenmode for the last equilibrium solution trends to zero as the step size is reduced, as shown for a representative example in Fig.~\ref{S_bmodetrend}.
-The buckling mode, reported in the main text, corresponds to the eigenmode with the lowest eigenvalue at the last load for which a stable equilibrium was computed.
 
-For the simulations presented in the text, we use $dx \approx dy \approx 0.25 mm$, forming a rectangular grid with 500,000 points.
-We use finite difference approximation of order $N=6$, as higher order approximations yield almost identical results.
 The code is written in python and uses Intel's Parallel Direct Sparse Solver Interface (PARDISO) to solve sparse matrices whenever required.
 
-Since a finite difference method discretization only couples adjacent points, the Jacobian for the system of equations is sparse. We therefore
-use sparse matrices with an optimized sparse matrix solver (pypardiso) at each iteration of the Newton's method. 
-
-Includes a single ghost point in the axial direction, and periodic boundary conditions in the circumferential direction. 
-
-2D positions are represented as a 1D matrix where each element in the 1D matrix corresponds to an x,y coordinate
-    #eigMatrix * w = rhs
-    #w is a 1D matrix representation of the 2D space. x = -h, 0, h, ..., L with y= 0, then same thing with y=h, then y=2h, etc... 
-Includes a "ghost point" on both sides in the x direction to encode the wxx = 0 boundary condition, such that there are Lpnts+2 elements in that direction 
-"True" points are therefore from 1 to Lpnts when zero indexed
-Ghost points are not required in the y direction since boundaries are periodic, these can just wrap around 
-
-eigMatrix = np.zeros(((Lpnts+2)*rpnts, (Lpnts+2)*rpnts))
-'''
