@@ -1,26 +1,3 @@
-
-'''
-This header is not yet written correctly or in an up to date way yet. Stay tuned!
-Overall strategy: 
-
-Solve the non-linear system of equations resulting from discretizing the non-linear system of PDEs using a modified Newton-Raphson method.
-
-Since a finite difference method discretization only couples adjacent points, the Jacobian for the system of equations is sparse. We therefore
-use sparse matrices with an optimized sparse matrix solver (pypardiso) at each iteration of the Newton's method. 
-
-Includes a single ghost point in the axial direction, and periodic boundary conditions in the circumferential direction. 
-
-2D positions are represented as a 1D matrix where each element in the 1D matrix corresponds to an x,y coordinate
-    #eigMatrix * w = rhs
-    #w is a 1D matrix representation of the 2D space. x = -h, 0, h, ..., L with y= 0, then same thing with y=h, then y=2h, etc... 
-Includes a "ghost point" on both sides in the x direction to encode the wxx = 0 boundary condition, such that there are Lpnts+2 elements in that direction 
-"True" points are therefore from 1 to Lpnts when zero indexed
-Ghost points are not required in the y direction since boundaries are periodic, these can just wrap around 
-
-eigMatrix = np.zeros(((Lpnts+2)*rpnts, (Lpnts+2)*rpnts))
-'''
-
-#Import python libraries 
 import numpy as np
 import time
 import sys
@@ -29,6 +6,7 @@ import matplotlib.pyplot as plot
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from IPython.display import clear_output #For ensuring the IPython display doesn't get overrun with print statements
 import pypardiso #Multicore sparse matrix solver
+import pandas
 
 #Import custom functions 
 from FastJacobian import fastJacobian #Import function to rapidly create sparse jacobian matrices
@@ -68,6 +46,7 @@ class FDM_Solver:
         #Create Jacobian calculating object
         self.fastJacob = fastJacobian(self.r, self.L, self.nu, self.dgen, self.w0_derivs, self.t_derivs)
             
+    
     def computeStrains(self, w, u, v):
         """
         Compute strains of the middle surface associated with deformations specified by w, u, and v. 
@@ -572,238 +551,6 @@ class FDM_Solver:
         #print("Took " + str(time.time()-t0) + " seconds to solve the jacobian.")
         return np.reshape(sol[0:(Lpnts+2)*rpnts], (Lpnts+2, rpnts)), np.reshape(sol[(Lpnts+2)*rpnts:2*(Lpnts+2)*rpnts], (Lpnts+2, rpnts)), np.reshape(sol[2*(Lpnts+2)*rpnts:], (Lpnts+2, rpnts))
     
-
-    def plotDisp(self, w, u, v):
-        """
-        Plots the radial, axial, and circumferential displacements. 
-        Since axial displacements are dominated by a large linear compression term obfuscating smaller variations, 
-        the first x derivative of u is plotted instead. 
-        
-        Arguments
-          w: deformations in the radial direction 
-          u: deformations in the axial direction
-          v: deformations in the circumferential direction
-        """
-        
-        X, Y, w0 = self.X, self.Y, self.w0_derivs[0]
-        deriv = self.dgen.deriv
-        
-        plot.figure(figsize=(12, 6), dpi=80)
-        plt1 = plot.subplot(221)
-        plt2 = plot.subplot(222)
-        plt3 = plot.subplot(223)
-
-        w_map = plt1.pcolormesh(Y[1:-1,:], X[1:-1,:], w[1:-1,:], shading = 'auto')
-        
-        divider = make_axes_locatable(plt1)
-        cax = divider.append_axes("right", size="5%", pad=0.05)
-        plot.colorbar(w_map, cax = cax)
-        plt1.title.set_text(r'$w$')
-        plt1.set_aspect(1)
-        
-        ux_map = plt2.pcolormesh(Y[1:-1,:], X[1:-1,:], deriv(u,1,0)[1:-1,:], shading = 'auto')
-        
-        divider = make_axes_locatable(plt2)
-        cax = divider.append_axes("right", size="5%", pad=0.05)
-        plot.colorbar(ux_map, cax = cax)
-        plt2.title.set_text(r'$u_x$')
-        plt2.set_aspect(1)
-        
-        v_map = plt3.pcolormesh(Y[1:-1,:], X[1:-1,:], v[1:-1,:], shading = 'auto')
-        
-        divider = make_axes_locatable(plt3)
-        cax = divider.append_axes("right", size="5%", pad=0.05)
-        plot.colorbar(v_map, cax = cax)
-        plt3.title.set_text(r'$v$')
-        plt3.set_aspect(1)
-        
-        plot.show()
-    
-    def plotImps(self):
-        """
-        Plots the radial and thickness geometric imperfections with which the solver object was initialized.
-        """
-        
-        X, Y, w0, t0 = self.X, self.Y, self.w0_derivs[0], self.t_derivs[0]
-
-        fig = plot.figure(figsize=(12, 6), dpi=80)
-        plt1 = plot.subplot(121)
-        plt2 = plot.subplot(122)
-
-        w_map = plt1.pcolormesh(Y[1:-1,:], X[1:-1,:], w0[1:-1,:], shading = 'auto')
-        
-        divider = make_axes_locatable(plt1)
-        cax = divider.append_axes("right", size="5%", pad=0.05)
-        plot.colorbar(w_map, cax = cax)
-        
-        plt1.title.set_text(r'$w_0$')
-        plt1.set_aspect(1)
-        
-        ux_map = plt2.pcolormesh(Y[1:-1,:], X[1:-1,:], t0[1:-1,:], shading = 'auto')
-        
-        divider = make_axes_locatable(plt2)
-        cax = divider.append_axes("right", size="5%", pad=0.05)
-        plot.colorbar(ux_map, cax = cax)
-        
-        plt2.title.set_text(r'$t$')
-        plt2.set_aspect(1)
-        
-        plot.show()
-    
-    def plotStress(self, w, u, v):
-        """
-        Plots the axial, circumferential, and shear stresses for the specified deformations.
-        
-        Arguments
-          w: deformations in the radial direction 
-          u: deformations in the axial direction
-          v: deformations in the circumferential direction
-        """
-        
-        X, Y = self.X, self.Y
-        
-        sigx, sigy, tau = self.computeStresses(w, u, v)
-        
-        plot.figure(figsize=(12, 6), dpi=80)
-        plt1 = plot.subplot(221)
-        plt2 = plot.subplot(222)
-        plt3 = plot.subplot(223)
-        
-        sigx_map = plt1.pcolormesh(Y[1:-1,:], X[1:-1,:], sigx[1:-1,:], shading = 'auto')
-        plot.colorbar(sigx_map, ax = plt1)
-        plt1.title.set_text(r'$\sigma_x$')
-        plt1.set_aspect(1)
-        
-        sigy_map = plt2.pcolormesh(Y[1:-1,:],X[1:-1,:], sigy[1:-1,:], shading = 'auto')
-        plot.colorbar(sigy_map, ax = plt2)
-        plt2.title.set_text(r'$\sigma_y$')
-        plt2.set_aspect(1)
-        
-        tau_map = plt3.pcolormesh(Y[1:-1,:], X[1:-1,:], tau[1:-1,:], shading = 'auto')
-        plot.colorbar(tau_map, ax = plt3)
-        plt3.title.set_text(r'$\tau_{xy}$')
-        plt3.set_aspect(1)
-        
-        plot.show()
-        
-    def plotError(self, err_w, err_u, err_v):
-        """
-        Plots the error. 
-        
-        Arguments
-          err_w: error in partial Energy partial w
-          err_u: error in partial Energy partial u
-          err_v: error in partial Energy partial v
-        """
-        
-        X, Y = self.X, self.Y
-        
-        plt1 = plot.subplot(221)
-        plt2 = plot.subplot(222)
-        plt3 = plot.subplot(223)
-        
-        error_w = plt1.pcolormesh(Y[1:-1], X[1:-1], err_w[1:-1], shading = 'auto')
-        plot.colorbar(error_w, ax = plt1)
-        plt1.title.set_text(r'Error $w$')
-        plt1.set_aspect(1)
-        
-        err_map_u = plt2.pcolormesh(Y[1:-1], X[1:-1], err_u[1:-1], shading = 'auto')
-        plot.colorbar(err_map_u, ax = plt2)
-        plt2.title.set_text(r'Error $u$')
-        plt2.set_aspect(1)
-        
-        err_map_v = plt3.pcolormesh(Y[1:-1], X[1:-1], err_v[1:-1], shading = 'auto')
-        plot.colorbar(err_map_v, ax = plt3)
-        plt3.title.set_text(r'Error $v$')
-        plt3.set_aspect(1)
-        
-        plot.show()
-    
-        
-    def saveCSV(self, ws, us, vs, name):
-        """
-        Saves the deformations associated with the simulations. 
-        
-        Arguments
-          ws: list of the deformations in the radial direction to be saved
-          us: list of the deformations in the axial direction  to be saved
-          vs: list of the deformations in the circumferential direction  to be saved
-          name: string of the folder name to be saved
-          
-        Outputs
-          meta.csv: A meta data file, containg information about the simulation parameters
-          imps.csv: An imperfections file, containing the geometric and thickness imperfections and their derivatives used in the simulation
-          data.csv: A simulation data file, containing the deformations, stresses, and strains for every w, u, and v in ws, us, and vs. 
-        """
-        
-        name = str(Path(sys.path[0]).parent.absolute()) + "\\Saved Simulations\\" + name
-        
-        Path(name).mkdir(parents = True, exist_ok = True)
-        
-        #First save the meta data file
-        num_frames = len(ws)
-        num_nodes = self.Lpnts*self.rpnts
-        meta_dict = {'r': np.array([self.r]), 
-                    'L': np.array([self.L]),
-                    'nu': np.array([self.nu]),
-                    'Lpnts': np.array([self.Lpnts]),
-                    'rpnts': np.array([self.rpnts]),
-                    'order': np.array([self.order]), 
-                    'frames': np.array([num_frames])
-                    }
-        
-        pandas.DataFrame(meta_dict).to_csv(name + "\\meta.csv", index = False)
-        
-        #Then save geometric imperfections
-        empty_array = np.zeros(num_frames*num_nodes)
-        
-        imp_dict = {'w0': self.w0_derivs[0][1:-1,:].flatten(),
-                    'w0x': self.w0_derivs[1][1:-1,:].flatten(),
-                    'w0y': self.w0_derivs[2][1:-1,:].flatten(),
-                    'w0xx': self.w0_derivs[3][1:-1,:].flatten(),
-                    'w0xy': self.w0_derivs[4][1:-1,:].flatten(),
-                    'w0yy': self.w0_derivs[5][1:-1,:].flatten(),
-                    't': self.t_derivs[0][1:-1,:].flatten(),
-                    'tx': self.t_derivs[1][1:-1,:].flatten(),
-                    'ty': self.t_derivs[2][1:-1,:].flatten(),
-                    'txx': self.t_derivs[3][1:-1,:].flatten(),
-                    'txy': self.t_derivs[4][1:-1,:].flatten(),
-                    'tyy': self.t_derivs[5][1:-1,:].flatten(),
-                    }
-        
-        pandas.DataFrame(imp_dict).to_csv(name + "\\imps.csv", index = False)
-        
-        #Then save the simulation data
-        data_dict = {'Frame': empty_array.copy(), 
-                    'w': empty_array.copy(),
-                    'u': empty_array.copy(),
-                    'v': empty_array.copy(),
-                    'ep1': empty_array.copy(),
-                    'ep2': empty_array.copy(),
-                    'gamma': empty_array.copy(),
-                    'sigx': empty_array.copy(),
-                    'sigy': empty_array.copy(),
-                    'tau': empty_array.copy()
-                    }
-        
-        for i in range(num_frames):
-            w, u, v = ws[i], us[i], vs[i]
-            ep1, ep2, gamma = self.computeStrains(w, u, v)
-            sigx, sigy, tau = self.computeStresses(w, u, v)
-            
-            data_dict['Frame'][i*num_nodes:(i+1)*num_nodes] = i
-            data_dict['w'][i*num_nodes:(i+1)*num_nodes] = w[1:-1,:].flatten()
-            data_dict['u'][i*num_nodes:(i+1)*num_nodes] = u[1:-1,:].flatten()
-            data_dict['v'][i*num_nodes:(i+1)*num_nodes] = v[1:-1,:].flatten()
-            data_dict['ep1'][i*num_nodes:(i+1)*num_nodes] = ep1[1:-1,:].flatten()
-            data_dict['ep2'][i*num_nodes:(i+1)*num_nodes] = ep2[1:-1,:].flatten()
-            data_dict['gamma'][i*num_nodes:(i+1)*num_nodes] = gamma[1:-1,:].flatten()
-            data_dict['sigx'][i*num_nodes:(i+1)*num_nodes] = sigx[1:-1,:].flatten()
-            data_dict['sigy'][i*num_nodes:(i+1)*num_nodes] = sigy[1:-1,:].flatten()
-            data_dict['tau'][i*num_nodes:(i+1)*num_nodes] = tau[1:-1,:].flatten()
-        
-        pandas.DataFrame(data_dict).to_csv(name + "\\data.csv", index = False)
-        
     def calc_n_eigenmodes(self, w, u, v, n, bc_type = 'disp'):
         """
         Computes the n eigenmodes with the lowest eigenvalues using Arnoldi iteration for the configuration specified by w, u, and v. 
@@ -997,6 +744,7 @@ class FDM_Solver:
         
         return eig_mode_w, eig_mode_u, eig_mode_v
         
+        
     def test_eigenmode(self, w, u, v, w_mode, u_mode, v_mode, eig_val = None, bc_type = 'disp'):
         """
         Tests the eigenvalue eigenmodes pairs computed with calc_n_eigenmodes or calc_single_eigenmode functions. 
@@ -1127,6 +875,263 @@ class FDM_Solver:
         plot.colorbar(diff_map, ax = plt3)
         plt3.title.set_text('Difference')
         
+    
+    def plotDisp(self, w, u, v):
+        """
+        Plots the radial, axial, and circumferential displacements. 
+        Since axial displacements are dominated by a large linear compression term obfuscating smaller variations, 
+        the first x derivative of u is plotted instead. 
+        
+        Arguments
+          w: deformations in the radial direction 
+          u: deformations in the axial direction
+          v: deformations in the circumferential direction
+        """
+        
+        X, Y, w0 = self.X, self.Y, self.w0_derivs[0]
+        deriv = self.dgen.deriv
+        
+        plot.figure(figsize=(12, 6), dpi=80)
+        plt1 = plot.subplot(221)
+        plt2 = plot.subplot(222)
+        plt3 = plot.subplot(223)
+
+        w_map = plt1.pcolormesh(Y[1:-1,:], X[1:-1,:], w[1:-1,:], shading = 'auto')
+        
+        divider = make_axes_locatable(plt1)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        plot.colorbar(w_map, cax = cax)
+        plt1.title.set_text(r'$w$')
+        plt1.set_aspect(1)
+        
+        ux_map = plt2.pcolormesh(Y[1:-1,:], X[1:-1,:], deriv(u,1,0)[1:-1,:], shading = 'auto')
+        
+        divider = make_axes_locatable(plt2)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        plot.colorbar(ux_map, cax = cax)
+        plt2.title.set_text(r'$u_x$')
+        plt2.set_aspect(1)
+        
+        v_map = plt3.pcolormesh(Y[1:-1,:], X[1:-1,:], v[1:-1,:], shading = 'auto')
+        
+        divider = make_axes_locatable(plt3)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        plot.colorbar(v_map, cax = cax)
+        plt3.title.set_text(r'$v$')
+        plt3.set_aspect(1)
+        
+        plot.show()
+    
+    def plotImps(self):
+        """
+        Plots the radial and thickness geometric imperfections with which the solver object was initialized.
+        """
+        
+        X, Y, w0, t0 = self.X, self.Y, self.w0_derivs[0], self.t_derivs[0]
+
+        fig = plot.figure(figsize=(12, 6), dpi=80)
+        plt1 = plot.subplot(121)
+        plt2 = plot.subplot(122)
+
+        w_map = plt1.pcolormesh(Y[1:-1,:], X[1:-1,:], w0[1:-1,:], shading = 'auto')
+        
+        divider = make_axes_locatable(plt1)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        plot.colorbar(w_map, cax = cax)
+        
+        plt1.title.set_text(r'$w_0$')
+        plt1.set_aspect(1)
+        
+        ux_map = plt2.pcolormesh(Y[1:-1,:], X[1:-1,:], t0[1:-1,:], shading = 'auto')
+        
+        divider = make_axes_locatable(plt2)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        plot.colorbar(ux_map, cax = cax)
+        
+        plt2.title.set_text(r'$t$')
+        plt2.set_aspect(1)
+        
+        plot.show()
+    
+    def plotStress(self, w, u, v):
+        """
+        Plots the axial, circumferential, and shear stresses for the specified deformations.
+        
+        Arguments
+          w: deformations in the radial direction 
+          u: deformations in the axial direction
+          v: deformations in the circumferential direction
+        """
+        
+        X, Y = self.X, self.Y
+        
+        sigx, sigy, tau = self.computeStresses(w, u, v)
+        
+        plot.figure(figsize=(12, 6), dpi=80)
+        plt1 = plot.subplot(221)
+        plt2 = plot.subplot(222)
+        plt3 = plot.subplot(223)
+        
+        sigx_map = plt1.pcolormesh(Y[1:-1,:], X[1:-1,:], sigx[1:-1,:], shading = 'auto')
+        
+        divider = make_axes_locatable(plt1)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        plot.colorbar(sigx_map, cax = cax)
+        
+        plt1.title.set_text(r'$\sigma_x$')
+        plt1.set_aspect(1)
+        
+        sigy_map = plt2.pcolormesh(Y[1:-1,:],X[1:-1,:], sigy[1:-1,:], shading = 'auto')
+        
+        divider = make_axes_locatable(plt2)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        plot.colorbar(sigy_map, cax = cax)
+        
+        plt2.title.set_text(r'$\sigma_y$')
+        plt2.set_aspect(1)
+        
+        tau_map = plt3.pcolormesh(Y[1:-1,:], X[1:-1,:], tau[1:-1,:], shading = 'auto')
+        
+        divider = make_axes_locatable(plt3)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        plot.colorbar(tau_map, cax = cax)
+        
+        plt3.title.set_text(r'$\tau_{xy}$')
+        plt3.set_aspect(1)
+        
+        plot.show()
+        
+    def plotError(self, err_w, err_u, err_v):
+        """
+        Plots the error. 
+        
+        Arguments
+          err_w: error in partial Energy partial w
+          err_u: error in partial Energy partial u
+          err_v: error in partial Energy partial v
+        """
+        
+        X, Y, w0 = self.X, self.Y, self.w0_derivs[0]
+        
+        plot.figure(figsize=(12, 6), dpi=80)
+        plt1 = plot.subplot(221)
+        plt2 = plot.subplot(222)
+        plt3 = plot.subplot(223)
+
+        err_map_w = plt1.pcolormesh(Y[1:-1,:], X[1:-1,:], err_w[1:-1,:], shading = 'auto')
+        
+        divider = make_axes_locatable(plt1)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        plot.colorbar(err_map_w, cax = cax)
+        
+        plt1.title.set_text(r'Error $w$')
+        plt1.set_aspect(1)
+        
+        err_map_u = plt2.pcolormesh(Y[1:-1,:], X[1:-1,:], err_u[1:-1,:], shading = 'auto')
+        
+        divider = make_axes_locatable(plt2)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        plot.colorbar(err_map_u, cax = cax)
+        
+        plt2.title.set_text(r'Error $u$')
+        plt2.set_aspect(1)
+        
+        err_map_v = plt3.pcolormesh(Y[1:-1,:], X[1:-1,:], err_v[1:-1,:], shading = 'auto')
+        
+        divider = make_axes_locatable(plt3)
+        cax = divider.append_axes("right", size="5%", pad=0.05)
+        plot.colorbar(err_map_v, cax = cax)
+        
+        plt3.title.set_text(r'Error $v$')
+        plt3.set_aspect(1)
+        
+        plot.show()
+    
+    def saveCSV(self, ws, us, vs, name):
+        """
+        Saves the deformations associated with the simulations. 
+        
+        Arguments
+          ws: list of the deformations in the radial direction to be saved
+          us: list of the deformations in the axial direction  to be saved
+          vs: list of the deformations in the circumferential direction  to be saved
+          name: string of the folder name to be saved
+          
+        Outputs
+          meta.csv: A meta data file, containg information about the simulation parameters
+          imps.csv: An imperfections file, containing the geometric and thickness imperfections and their derivatives used in the simulation
+          data.csv: A simulation data file, containing the deformations, stresses, and strains for every w, u, and v in ws, us, and vs. 
+        """
+        
+        name = str(Path(sys.path[0]).parent.absolute()) + "\\Saved Simulations\\" + name
+        
+        Path(name).mkdir(parents = True, exist_ok = True)
+        
+        #First save the meta data file
+        num_frames = len(ws)
+        num_nodes = self.Lpnts*self.rpnts
+        meta_dict = {'r': np.array([self.r]), 
+                    'L': np.array([self.L]),
+                    'nu': np.array([self.nu]),
+                    'Lpnts': np.array([self.Lpnts]),
+                    'rpnts': np.array([self.rpnts]),
+                    'order': np.array([self.order]), 
+                    'frames': np.array([num_frames])
+                    }
+        
+        pandas.DataFrame(meta_dict).to_csv(name + "\\meta.csv", index = False)
+        
+        #Then save geometric imperfections
+        empty_array = np.zeros(num_frames*num_nodes)
+        
+        imp_dict = {'w0': self.w0_derivs[0][1:-1,:].flatten(),
+                    'w0x': self.w0_derivs[1][1:-1,:].flatten(),
+                    'w0y': self.w0_derivs[2][1:-1,:].flatten(),
+                    'w0xx': self.w0_derivs[3][1:-1,:].flatten(),
+                    'w0xy': self.w0_derivs[4][1:-1,:].flatten(),
+                    'w0yy': self.w0_derivs[5][1:-1,:].flatten(),
+                    't': self.t_derivs[0][1:-1,:].flatten(),
+                    'tx': self.t_derivs[1][1:-1,:].flatten(),
+                    'ty': self.t_derivs[2][1:-1,:].flatten(),
+                    'txx': self.t_derivs[3][1:-1,:].flatten(),
+                    'txy': self.t_derivs[4][1:-1,:].flatten(),
+                    'tyy': self.t_derivs[5][1:-1,:].flatten(),
+                    }
+        
+        pandas.DataFrame(imp_dict).to_csv(name + "\\imps.csv", index = False)
+        
+        #Then save the simulation data
+        data_dict = {'Frame': empty_array.copy(), 
+                    'w': empty_array.copy(),
+                    'u': empty_array.copy(),
+                    'v': empty_array.copy(),
+                    'ep1': empty_array.copy(),
+                    'ep2': empty_array.copy(),
+                    'gamma': empty_array.copy(),
+                    'sigx': empty_array.copy(),
+                    'sigy': empty_array.copy(),
+                    'tau': empty_array.copy()
+                    }
+        
+        for i in range(num_frames):
+            w, u, v = ws[i], us[i], vs[i]
+            ep1, ep2, gamma = self.computeStrains(w, u, v)
+            sigx, sigy, tau = self.computeStresses(w, u, v)
+            
+            data_dict['Frame'][i*num_nodes:(i+1)*num_nodes] = i
+            data_dict['w'][i*num_nodes:(i+1)*num_nodes] = w[1:-1,:].flatten()
+            data_dict['u'][i*num_nodes:(i+1)*num_nodes] = u[1:-1,:].flatten()
+            data_dict['v'][i*num_nodes:(i+1)*num_nodes] = v[1:-1,:].flatten()
+            data_dict['ep1'][i*num_nodes:(i+1)*num_nodes] = ep1[1:-1,:].flatten()
+            data_dict['ep2'][i*num_nodes:(i+1)*num_nodes] = ep2[1:-1,:].flatten()
+            data_dict['gamma'][i*num_nodes:(i+1)*num_nodes] = gamma[1:-1,:].flatten()
+            data_dict['sigx'][i*num_nodes:(i+1)*num_nodes] = sigx[1:-1,:].flatten()
+            data_dict['sigy'][i*num_nodes:(i+1)*num_nodes] = sigy[1:-1,:].flatten()
+            data_dict['tau'][i*num_nodes:(i+1)*num_nodes] = tau[1:-1,:].flatten()
+        
+        pandas.DataFrame(data_dict).to_csv(name + "\\data.csv", index = False)
+        
+
 def getPoly1DMatrix(load_list, w_list, u_list, v_list):
     num_frames, xpnts, ypnts = np.array(w_list).shape
     load_list = np.array(load_list, dtype = np.longdouble)
